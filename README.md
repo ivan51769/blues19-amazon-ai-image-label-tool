@@ -54,11 +54,19 @@ XMP dc:subject = contains-synthetic-performer
 
 ## 下载与运行
 
-直接双击：
+从 [GitHub Releases](https://github.com/ivan51769/blues19-amazon-ai-image-label-tool/releases/latest) 下载：
 
 ```text
 blues19-amazon-ai-image-label-tool.exe
 ```
+
+可同时下载 `blues19-SHA256SUMS.txt`，使用 Windows PowerShell 校验文件完整性：
+
+```powershell
+Get-FileHash .\blues19-amazon-ai-image-label-tool.exe -Algorithm SHA256
+```
+
+确认输出与校验文件中的 SHA-256 一致后，直接双击 EXE 运行。
 
 如果从源码运行，双击：
 
@@ -160,6 +168,7 @@ dist\blues19-amazon-ai-image-label-tool.exe
 - `blues19-brand-logo.png`：品牌 LOGO。
 - `blues19-amazon-ai-label-policy.jpg`：亚马逊政策背景截图。
 - `blues19-AGENT_INSTALL_PROMPT.md`：交给 Agent 的一句话安装与验收提示词。
+- `blues19-SHA256SUMS.txt`：Release 成品的 SHA-256 校验值。
 - `tests\test_core.py`：核心功能测试。
 - `tools\exiftool.exe`：本地元数据处理组件。
 
