@@ -1,0 +1,7 @@
+/build/
+/dist/
+/__pycache__/
+/tests/__pycache__/
+*.py[cod]
+*.log
+/blues19-amazon-ai-image-label-tool.exe
