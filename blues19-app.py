@@ -229,7 +229,17 @@ def run_exiftool_files(args: list[str], paths: list[Path]) -> subprocess.Complet
         for path in paths:
             handle.write(str(path) + "\n")
     try:
-        return run_exiftool(["-charset", "filename=UTF8", *args, "-@", str(arg_file)])
+        return run_exiftool(
+            [
+                "-charset",
+                "filename=UTF8",
+                "-api",
+                "WindowsWideFile=1",
+                *args,
+                "-@",
+                str(arg_file),
+            ]
+        )
     finally:
         arg_file.unlink(missing_ok=True)
 

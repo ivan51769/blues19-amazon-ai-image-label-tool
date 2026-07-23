@@ -3,6 +3,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 APP_PATH = Path(__file__).resolve().parents[1] / "blues19-app.py"
 SPEC = importlib.util.spec_from_file_location("blues19_app", APP_PATH)
@@ -24,6 +25,28 @@ PNG_1X1 = base64.b64decode(
 
 
 class ImageFilesTests(unittest.TestCase):
+    def test_exiftool_forces_windows_wide_character_file_io(self):
+        result = mock.Mock()
+        with mock.patch.object(app, "run_exiftool", return_value=result) as run:
+            returned = app.run_exiftool_files(
+                ["-j", "-XMP-dc:Subject"],
+                [Path(r"C:\中文目录\测试图片.png")],
+            )
+
+        self.assertIs(returned, result)
+        arguments = run.call_args.args[0]
+        self.assertEqual(
+            arguments[:6],
+            [
+                "-charset",
+                "filename=UTF8",
+                "-api",
+                "WindowsWideFile=1",
+                "-j",
+                "-XMP-dc:Subject",
+            ],
+        )
+
     def test_filters_routine_exiftool_status_lines(self):
         messages = exiftool_messages("    2 image files read\nWarning: damaged metadata\n")
         self.assertEqual(messages, ["Warning: damaged metadata"])
@@ -50,6 +73,22 @@ class ImageFilesTests(unittest.TestCase):
 
             updated_again, errors = write_tag([image.resolve()])
             self.assertEqual(updated_again, 0, errors)
+
+            cleared, errors = clear_tag([image.resolve()])
+            self.assertEqual(cleared, 1, errors)
+            self.assertEqual(read_tagged([image.resolve()])[0], [])
+
+    @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
+    def test_write_read_and_clear_in_unicode_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "中文目录"
+            folder.mkdir()
+            image = folder / "测试图片.png"
+            image.write_bytes(PNG_1X1)
+
+            updated, errors = write_tag([image.resolve()])
+            self.assertEqual(updated, 1, errors)
+            self.assertEqual(read_tagged([image.resolve()])[0], [image.resolve()])
 
             cleared, errors = clear_tag([image.resolve()])
             self.assertEqual(cleared, 1, errors)
