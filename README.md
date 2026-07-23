@@ -66,6 +66,12 @@ blues19-amazon-ai-image-label-tool.exe
 blues19-启动工具.cmd
 ```
 
+## 交给 Agent 一句话安装
+
+如果电脑上有 Codex、Claude Code 等能够执行 Windows 操作的 Agent，直接复制 [Agent 一句话安装提示词](blues19-AGENT_INSTALL_PROMPT.md) 即可。
+
+提示词包含来源确认、独立环境安装、测试、EXE 构建、桌面快捷方式、启动验证和安全边界。Agent 必须给出实际验证结果，不能只报告“安装成功”。
+
 ## 使用方法
 
 ### 主面板
@@ -153,6 +159,7 @@ dist\blues19-amazon-ai-image-label-tool.exe
 - `blues19-启动工具.cmd`：源码启动脚本。
 - `blues19-brand-logo.png`：品牌 LOGO。
 - `blues19-amazon-ai-label-policy.jpg`：亚马逊政策背景截图。
+- `blues19-AGENT_INSTALL_PROMPT.md`：交给 Agent 的一句话安装与验收提示词。
 - `tests\test_core.py`：核心功能测试。
 - `tools\exiftool.exe`：本地元数据处理组件。
 
