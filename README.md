@@ -30,6 +30,44 @@ XMP dc:subject = contains-synthetic-performer
 - 不包含任何人物。
 - 不包含逼真人物。
 
+## 界面预览与说明
+
+### 主操作面板
+
+![主操作面板](blues19-docs-main-panel.png)
+
+主面板用于完成日常批量处理：
+
+- 将一张或多张图片、一个图片文件夹直接拖入空白区域。
+- 在顶部设置输出文件尾缀，并切换“替换原文件”或“保留源文件”。
+- “完成后打开目录”默认启用，写入结束后会自动打开输出位置。
+- 点击“写入标签”批量写入，点击“清除标签”撤销本工具写入的目标标签。
+- 图片载入后可使用列表或平铺视图，并调整缩略图大小。
+- 每张缩略图右侧直接显示是否包含 `contains-synthetic-performer`，无需单独核验按钮。
+
+### 悬浮窗快速写入
+
+![悬浮窗快速写入](blues19-docs-floating-bubble.png)
+
+悬浮窗用于少量图片的快速处理：
+
+- 把图片直接拖到圆形悬浮窗，工具会立即按主面板当前模式写入并复查标签。
+- 写入成功后显示绿色圆环和完成标记，不再弹出结果对话框。
+- 悬浮窗支持拖动；双击或右键可唤回主窗口。
+- 是否显示悬浮窗可在设置中切换。
+
+### 设置面板
+
+![设置面板](blues19-docs-settings-panel.png)
+
+点击主窗口右上角的齿轮，设置区会从窗口右侧展开：
+
+- 主题：切换七彩字、磨砂玻璃、霓虹蓝、橙粉和粉紫等外观。
+- 字体：默认使用微软雅黑，也可选择其他可用字体。
+- 文字颜色：应用到整个操作面板；公众号和作者署名保持七彩渐变效果。
+- 悬浮窗：控制是否启用圆形快速写入入口。
+- 设置会自动保存，下次启动继续使用。
+
 ## 功能
 
 - 将多张图片或一个文件夹拖入主面板。
@@ -167,6 +205,9 @@ dist\blues19-amazon-ai-image-label-tool.exe
 - `blues19-启动工具.cmd`：源码启动脚本。
 - `blues19-brand-logo.png`：品牌 LOGO。
 - `blues19-amazon-ai-label-policy.jpg`：亚马逊政策背景截图。
+- `blues19-docs-main-panel.png`：主操作面板截图。
+- `blues19-docs-floating-bubble.png`：悬浮窗截图。
+- `blues19-docs-settings-panel.png`：设置面板截图。
 - `blues19-AGENT_INSTALL_PROMPT.md`：交给 Agent 的一句话安装与验收提示词。
 - `blues19-SHA256SUMS.txt`：Release 成品的 SHA-256 校验值。
 - `tests\test_core.py`：核心功能测试。
