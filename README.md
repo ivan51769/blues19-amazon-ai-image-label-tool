@@ -49,6 +49,8 @@ XMP dc:subject = contains-synthetic-performer
 
 ![悬浮窗快速写入](blues19-docs-floating-bubble.png)
 
+上图由当前版本的悬浮窗绘制参数直接生成，与程序内 88 × 88 高 DPI 悬浮窗一致，不含旧版粉色外圈。
+
 悬浮窗用于少量图片的快速处理：
 
 - 把图片直接拖到圆形悬浮窗，工具会立即按主面板当前模式写入并复查标签。
@@ -206,7 +208,7 @@ dist\blues19-amazon-ai-image-label-tool.exe
 - `blues19-brand-logo.png`：品牌 LOGO。
 - `blues19-amazon-ai-label-policy.jpg`：亚马逊政策背景截图。
 - `blues19-docs-main-panel.png`：主操作面板截图。
-- `blues19-docs-floating-bubble.png`：悬浮窗截图。
+- `blues19-docs-floating-bubble.png`：当前悬浮窗样式预览。
 - `blues19-docs-settings-panel.png`：设置面板截图。
 - `blues19-AGENT_INSTALL_PROMPT.md`：交给 Agent 的一句话安装与验收提示词。
 - `blues19-SHA256SUMS.txt`：Release 成品的 SHA-256 校验值。
