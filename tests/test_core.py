@@ -138,6 +138,15 @@ class ImageFilesTests(unittest.TestCase):
             if root.winfo_exists():
                 root.quit_app()
 
+    def test_tray_on_close_defaults_to_enabled_for_new_install(self):
+        with mock.patch.object(app.App, "_load_settings", return_value={}):
+            root = app.App()
+        try:
+            self.assertTrue(root.tray_on_close.get())
+        finally:
+            if root.winfo_exists():
+                root.quit_app()
+
     def test_tray_icon_uses_floating_bubble_visual_language(self):
         root = app.App()
         try:

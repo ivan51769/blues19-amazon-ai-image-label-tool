@@ -25,7 +25,7 @@ except ImportError:
 
 
 TAG = "contains-synthetic-performer"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 DEFAULT_SUFFIX = "_AI标记"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 APP_DIR = Path(__file__).resolve().parent
@@ -673,7 +673,7 @@ class App(TkinterDnD.Tk):
         self.FONT_FAMILY = self.font_family.get()
         self.bubble_enabled = tk.BooleanVar(value=bool(saved_settings.get("bubble_enabled", True)))
         self.tray_on_close = tk.BooleanVar(
-            value=bool(saved_settings.get("tray_on_close", False))
+            value=bool(saved_settings.get("tray_on_close", True))
         )
         self._apply_theme_tokens(theme_id)
         self._apply_text_tokens()
