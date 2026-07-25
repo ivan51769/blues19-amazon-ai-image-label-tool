@@ -121,6 +121,50 @@ class ImageFilesTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_close_button_routes_to_tray_only_when_enabled(self):
+        root = app.App()
+        try:
+            root.update()
+            root.tray_on_close.set(True)
+            with mock.patch.object(root, "hide_to_tray") as hide:
+                root.on_close_request()
+            hide.assert_called_once_with()
+
+            root.tray_on_close.set(False)
+            with mock.patch.object(root, "quit_app") as quit_app:
+                root.on_close_request()
+            quit_app.assert_called_once_with()
+        finally:
+            if root.winfo_exists():
+                root.quit_app()
+
+    def test_tray_icon_uses_floating_bubble_visual_language(self):
+        root = app.App()
+        try:
+            root.update()
+            icon = root._tray_icon_image()
+            self.assertEqual(icon.size, (64, 64))
+            self.assertEqual(icon.mode, "RGBA")
+            self.assertGreater(icon.getpixel((32, 32))[3], 0)
+            self.assertEqual(icon.getpixel((0, 0))[3], 0)
+        finally:
+            if root.winfo_exists():
+                root.quit_app()
+
+    def test_settings_brand_stays_inside_panel_at_default_height(self):
+        root = app.App()
+        try:
+            root.geometry("760x720")
+            root.update()
+            root._show_settings_panel()
+            root.update()
+            brand_bottom = root.settings_brand.winfo_rooty() + root.settings_brand.winfo_height()
+            panel_bottom = root.settings_panel.winfo_rooty() + root.settings_panel.winfo_height()
+            self.assertLessEqual(brand_bottom, panel_bottom)
+        finally:
+            if root.winfo_exists():
+                root.quit_app()
+
     @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
     def test_replace_source_renames_original(self):
         with tempfile.TemporaryDirectory() as tmp:

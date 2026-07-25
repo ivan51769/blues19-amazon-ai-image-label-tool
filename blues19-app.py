@@ -18,8 +18,14 @@ from tkinter import filedialog, font as tkfont, ttk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+try:
+    import pystray
+except ImportError:
+    pystray = None
+
 
 TAG = "contains-synthetic-performer"
+APP_VERSION = "1.1.0"
 DEFAULT_SUFFIX = "_AI标记"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 APP_DIR = Path(__file__).resolve().parent
@@ -644,7 +650,9 @@ class App(TkinterDnD.Tk):
                 self.tk.call("tk", "scaling", max(1.0, dpi / 72.0))
             except (AttributeError, OSError, tk.TclError):
                 pass
-        self.title("blues19-亚马逊 AI 人物图片标签工具 · 拾玖Blues")
+        self.title(
+            f"blues19-亚马逊 AI 人物图片标签工具 v{APP_VERSION} · 拾玖Blues"
+        )
         self.geometry("760x720")
         self.minsize(720, 580)
         saved_settings = self._load_settings()
@@ -664,6 +672,9 @@ class App(TkinterDnD.Tk):
         )
         self.FONT_FAMILY = self.font_family.get()
         self.bubble_enabled = tk.BooleanVar(value=bool(saved_settings.get("bubble_enabled", True)))
+        self.tray_on_close = tk.BooleanVar(
+            value=bool(saved_settings.get("tray_on_close", False))
+        )
         self._apply_theme_tokens(theme_id)
         self._apply_text_tokens()
         self.configure(background=self.CANVAS)
@@ -686,8 +697,12 @@ class App(TkinterDnD.Tk):
         self.result_tree: ttk.Treeview | None = None
         self.busy = False
         self.task_queue: Queue[tuple[str, object]] = Queue()
+        self.tray_actions: Queue[str] = Queue()
         self.thumb_after_id: str | None = None
         self.settings_expanded = False
+        self.tray_icon = None
+        self.tray_poll_after_id: str | None = None
+        self._quitting = False
         self._configure_style()
         self._build_ui()
         self._apply_gradient_labels(self)
@@ -704,6 +719,7 @@ class App(TkinterDnD.Tk):
             self.drop_bubble.withdraw()
         self.bind("<Control-c>", lambda _event: self.copy_paths())
         self.bind("<Escape>", lambda _event: self.focus_set())
+        self.protocol("WM_DELETE_WINDOW", self.on_close_request)
 
     def _load_settings(self) -> dict:
         try:
@@ -722,6 +738,7 @@ class App(TkinterDnD.Tk):
                         "accent_text": self.accent_text.get(),
                         "text_color_version": 2,
                         "bubble_enabled": self.bubble_enabled.get(),
+                        "tray_on_close": self.tray_on_close.get(),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1096,7 +1113,7 @@ class App(TkinterDnD.Tk):
         panel.place(x=770, y=18, width=settings_width - 20, relheight=1, height=-36)
         self.settings_panel = panel
         panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(13, weight=1)
+        panel.rowconfigure(14, weight=1)
         ttk.Label(panel, text="外观设置", style="Header.TLabel").grid(
             row=0, column=0, sticky="w"
         )
@@ -1172,21 +1189,29 @@ class App(TkinterDnD.Tk):
             command=self.on_bubble_enabled,
             style="Surface.TCheckbutton",
         ).grid(row=11, column=0, sticky="w")
+        ttk.Checkbutton(
+            panel,
+            text="关闭按钮隐藏到系统托盘",
+            variable=self.tray_on_close,
+            command=self.on_tray_on_close_change,
+            style="Surface.TCheckbutton",
+        ).grid(row=12, column=0, sticky="w", pady=(10, 0))
         ttk.Label(
             panel,
-            text="拖入图片后会直接写入标签，成功时显示绿色灯效。",
+            text="拖入悬浮窗会直接写入标签；启用托盘后，点击关闭按钮不会退出工具。",
             style="SurfaceMuted.TLabel",
             wraplength=290,
-        ).grid(row=12, column=0, sticky="w", pady=(14, 0))
+        ).grid(row=13, column=0, sticky="w", pady=(12, 0))
 
         brand = ttk.Frame(panel, style="Surface.TFrame")
-        brand.grid(row=14, column=0, sticky="ew", pady=(18, 0))
+        brand.grid(row=15, column=0, sticky="ew", pady=(10, 0))
+        self.settings_brand = brand
         logo_path = RESOURCE_DIR / "blues19-brand-logo.png"
         try:
             with Image.open(logo_path) as source_logo:
-                logo = source_logo.convert("RGBA").resize((76, 76), Image.Resampling.LANCZOS)
+                logo = source_logo.convert("RGBA").resize((60, 60), Image.Resampling.LANCZOS)
             mask = Image.new("L", logo.size, 0)
-            ImageDraw.Draw(mask).ellipse((1, 1, 74, 74), fill=255)
+            ImageDraw.Draw(mask).ellipse((1, 1, 58, 58), fill=255)
             logo.putalpha(mask)
             self.brand_logo_photo = ImageTk.PhotoImage(logo)
             ttk.Label(brand, image=self.brand_logo_photo, style="Surface.TLabel").pack(
@@ -1302,6 +1327,149 @@ class App(TkinterDnD.Tk):
         else:
             self.drop_bubble.withdraw()
         self._save_settings()
+
+    def on_tray_on_close_change(self) -> None:
+        self._save_settings()
+
+    def _tray_icon_image(self, size: int = 64) -> Image.Image:
+        scale = size / 88
+        artwork = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(artwork)
+        draw.ellipse(
+            (2 * scale, 2 * scale, size - 2 * scale, size - 2 * scale),
+            fill=self.ACTION_SOFT,
+            outline=self.ACTION,
+            width=max(2, round(2 * scale)),
+        )
+        draw.ellipse(
+            (5 * scale, 5 * scale, size - 5 * scale, size - 5 * scale),
+            fill=self.ACTIVE,
+            outline="#67D9F5",
+            width=max(2, round(2 * scale)),
+        )
+        center = size / 2
+        for index in range(24):
+            angle = math.radians(index * 15)
+            outer_radius = 39 * scale
+            inner_radius = (35 if index % 3 else 33) * scale
+            draw.line(
+                (
+                    center + math.cos(angle) * inner_radius,
+                    center + math.sin(angle) * inner_radius,
+                    center + math.cos(angle) * outer_radius,
+                    center + math.sin(angle) * outer_radius,
+                ),
+                fill=self.ACTION,
+                width=max(1, round(scale)),
+            )
+        inner = 13 * scale
+        draw.ellipse(
+            (inner, inner, size - inner, size - inner),
+            fill="#071D2B",
+            outline="#7DE8FF",
+            width=max(2, round(2 * scale)),
+        )
+        font_path = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "segoeuib.ttf"
+        try:
+            tray_font = ImageFont.truetype(str(font_path), round(20 * scale))
+        except OSError:
+            tray_font = ImageFont.load_default()
+        draw.text(
+            (center, center),
+            "AI",
+            fill="#62D9FF",
+            font=tray_font,
+            anchor="mm",
+        )
+        return artwork
+
+    def _ensure_tray_icon(self) -> bool:
+        if self.tray_icon is not None:
+            return True
+        if pystray is None:
+            return False
+        menu = pystray.Menu(
+            pystray.MenuItem("显示主面板", self._request_show_from_tray, default=True),
+            pystray.MenuItem("退出工具", self._request_exit_from_tray),
+        )
+        self.tray_icon = pystray.Icon(
+            "blues19-ai-image-label-tool",
+            self._tray_icon_image(),
+            "blues19 AI 人物图片标签",
+            menu,
+        )
+        try:
+            self.tray_icon.run_detached()
+        except Exception:
+            self.tray_icon = None
+            return False
+        self.tray_poll_after_id = self.after(100, self._poll_tray_actions)
+        return True
+
+    def _stop_tray_icon(self) -> None:
+        if self.tray_poll_after_id is not None:
+            try:
+                self.after_cancel(self.tray_poll_after_id)
+            except tk.TclError:
+                pass
+            self.tray_poll_after_id = None
+        icon = self.tray_icon
+        self.tray_icon = None
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+    def _request_show_from_tray(self, _icon=None, _item=None) -> None:
+        self.tray_actions.put("show")
+
+    def _request_exit_from_tray(self, _icon=None, _item=None) -> None:
+        self.tray_actions.put("exit")
+
+    def _poll_tray_actions(self) -> None:
+        self.tray_poll_after_id = None
+        if self._quitting:
+            return
+        try:
+            while True:
+                action = self.tray_actions.get_nowait()
+                if action == "show":
+                    self.restore_from_tray()
+                elif action == "exit":
+                    self.quit_app()
+                    return
+        except Empty:
+            pass
+        if self.tray_icon is not None:
+            self.tray_poll_after_id = self.after(100, self._poll_tray_actions)
+
+    def hide_to_tray(self) -> None:
+        if not self._ensure_tray_icon():
+            self.status.set("系统托盘组件不可用 · 已最小化到任务栏")
+            self.iconify()
+            return
+        self.withdraw()
+
+    def restore_from_tray(self) -> None:
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self._stop_tray_icon()
+        self.status.set("已从系统托盘恢复")
+
+    def on_close_request(self) -> None:
+        if self.tray_on_close.get():
+            self.hide_to_tray()
+        else:
+            self.quit_app()
+
+    def quit_app(self) -> None:
+        if self._quitting:
+            return
+        self._quitting = True
+        self._stop_tray_icon()
+        self.destroy()
 
     def _gradient_text_photo(self, text: str) -> ImageTk.PhotoImage:
         scale = 3

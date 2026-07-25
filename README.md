@@ -8,6 +8,15 @@ XMP dc:subject = contains-synthetic-performer
 
 作者：拾玖Blues
 公众号：拾玖说跨境AI
+当前版本：v1.1.0
+
+## v1.1.0 更新
+
+- 新增“关闭按钮隐藏到系统托盘”，默认关闭，可在设置中启用。
+- 托盘图标沿用科技蓝悬浮窗视觉，支持恢复主面板和真正退出工具。
+- 修复设置面板底部品牌 LOGO 在默认窗口高度下被裁切的问题。
+- Release 单文件 EXE 内置托盘依赖，Windows 10/11 无需另行安装组件。
+- 新增关闭行为、托盘图标和设置面板布局回归测试。
 
 ## 为什么做这个工具
 
@@ -68,6 +77,7 @@ XMP dc:subject = contains-synthetic-performer
 - 字体：默认使用微软雅黑，也可选择其他可用字体。
 - 文字颜色：应用到整个操作面板；公众号和作者署名保持七彩渐变效果。
 - 悬浮窗：控制是否启用圆形快速写入入口。
+- 系统托盘：可启用“关闭按钮隐藏到系统托盘”；托盘图标沿用科技蓝悬浮圆窗样式，右键可显示主面板或真正退出工具。
 - 设置会自动保存，下次启动继续使用。
 
 ## 功能
@@ -92,6 +102,8 @@ XMP dc:subject = contains-synthetic-performer
 - 标题栏、滚动条、输入框和下拉框跟随主题。
 - 支持字体与面板文字颜色设置，默认微软雅黑和深墨色。
 - 设置面板展示“拾玖说跨境AI”品牌 LOGO 与作者信息。
+- 可选择点击关闭按钮时隐藏到 Windows 系统托盘，而不是退出程序。
+- 系统托盘菜单支持“显示主面板”和“退出工具”。
 
 ## 下载与运行
 
@@ -108,6 +120,8 @@ Get-FileHash .\blues19-amazon-ai-image-label-tool.exe -Algorithm SHA256
 ```
 
 确认输出与校验文件中的 SHA-256 一致后，直接双击 EXE 运行。
+
+Release 提供的是单文件 Windows EXE，已打包 Tcl/Tk、tkinterdnd2、pystray、Pillow 和 ExifTool。其他 Windows 10/11 电脑无需另外安装 Python、Tk 或托盘组件。
 
 如果从源码运行，双击：
 
@@ -139,6 +153,15 @@ blues19-启动工具.cmd
 4. 写入并核验成功后，悬浮窗会短暂显示绿色圆环和勾号。
 
 悬浮窗支持拖动；双击或右键悬浮窗可以唤回主窗口。
+
+### 隐藏到系统托盘
+
+1. 点击右上角齿轮打开设置。
+2. 启用“关闭按钮隐藏到系统托盘”。
+3. 点击窗口右上角关闭按钮，主面板会隐藏到电脑右下角系统托盘。
+4. 双击托盘图标或在右键菜单选择“显示主面板”即可恢复；选择“退出工具”才会真正结束程序。
+
+该选项默认关闭，以保持原有的关闭即退出行为。
 
 ## 两种输出模式
 
@@ -175,12 +198,13 @@ blues19-启动工具.cmd
 - Python 3.12
 - Pillow
 - tkinterdnd2
+- pystray
 - PyInstaller
 
 安装 Python 依赖：
 
 ```powershell
-python -m pip install Pillow tkinterdnd2 pyinstaller
+python -m pip install Pillow tkinterdnd2 pystray pyinstaller
 ```
 
 运行测试：
