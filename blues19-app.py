@@ -25,7 +25,7 @@ except ImportError:
 
 
 TAG = "contains-synthetic-performer"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 DEFAULT_SUFFIX = "_AI标记"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 APP_DIR = Path(__file__).resolve().parent
@@ -1109,8 +1109,8 @@ class App(TkinterDnD.Tk):
         self.geometry(f"{expanded_width}x{height}+{x}+{y}")
         self.settings_expanded = True
 
-        panel = ttk.Frame(self, style="Card.TFrame", padding=(18, 18))
-        panel.place(x=770, y=18, width=settings_width - 20, relheight=1, height=-36)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=(14, 12))
+        panel.place(x=770, y=12, width=settings_width - 20, relheight=1, height=-24)
         self.settings_panel = panel
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(14, weight=1)
@@ -1118,13 +1118,14 @@ class App(TkinterDnD.Tk):
             row=0, column=0, sticky="w"
         )
         ttk.Label(panel, text="选择主题与悬浮窗显示方式", style="SurfaceMuted.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(3, 18)
+            row=1, column=0, sticky="w", pady=(2, 10)
         )
         ttk.Label(panel, text="界面主题", style="Section.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(0, 8)
+            row=2, column=0, sticky="w", pady=(0, 5)
         )
         theme_row = ttk.Frame(panel, style="Surface.TFrame")
         theme_row.grid(row=3, column=0, sticky="ew")
+        self.settings_theme_buttons = []
         for index, (theme_id, theme) in enumerate(THEMES.items()):
             option = tk.Radiobutton(
                 theme_row,
@@ -1142,18 +1143,25 @@ class App(TkinterDnD.Tk):
                 relief="flat",
                 borderwidth=0,
                 highlightthickness=0,
-                padx=10,
-                pady=7,
+                padx=6,
+                pady=4,
                 cursor="hand2",
             )
-            option.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0, 6), pady=(0, 6))
-            theme_row.columnconfigure(index % 2, weight=1)
+            option.grid(
+                row=index // 3,
+                column=index % 3,
+                sticky="ew",
+                padx=(0, 4) if index % 3 < 2 else 0,
+                pady=(0, 4),
+            )
+            theme_row.columnconfigure(index % 3, weight=1)
+            self.settings_theme_buttons.append(option)
 
         ttk.Separator(panel, orient="horizontal").grid(
-            row=4, column=0, sticky="ew", pady=(14, 16)
+            row=4, column=0, sticky="ew", pady=(8, 10)
         )
         ttk.Label(panel, text="字体", style="Section.TLabel").grid(
-            row=5, column=0, sticky="w", pady=(0, 8)
+            row=5, column=0, sticky="w", pady=(0, 5)
         )
         font_box = ttk.Combobox(
             panel,
@@ -1165,7 +1173,7 @@ class App(TkinterDnD.Tk):
         font_box.grid(row=6, column=0, sticky="ew")
         font_box.bind("<<ComboboxSelected>>", self.on_appearance_change)
         ttk.Label(panel, text="强调文字颜色", style="SurfaceMuted.TLabel").grid(
-            row=7, column=0, sticky="w", pady=(12, 5)
+            row=7, column=0, sticky="w", pady=(8, 4)
         )
         accent_box = ttk.Combobox(
             panel,
@@ -1177,10 +1185,10 @@ class App(TkinterDnD.Tk):
         accent_box.grid(row=8, column=0, sticky="ew")
         accent_box.bind("<<ComboboxSelected>>", self.on_appearance_change)
         ttk.Separator(panel, orient="horizontal").grid(
-            row=9, column=0, sticky="ew", pady=(18, 16)
+            row=9, column=0, sticky="ew", pady=(10, 10)
         )
         ttk.Label(panel, text="悬浮窗", style="Section.TLabel").grid(
-            row=10, column=0, sticky="w", pady=(0, 8)
+            row=10, column=0, sticky="w", pady=(0, 5)
         )
         ttk.Checkbutton(
             panel,
@@ -1195,27 +1203,27 @@ class App(TkinterDnD.Tk):
             variable=self.tray_on_close,
             command=self.on_tray_on_close_change,
             style="Surface.TCheckbutton",
-        ).grid(row=12, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=12, column=0, sticky="w", pady=(6, 0))
         ttk.Label(
             panel,
             text="拖入悬浮窗会直接写入标签；启用托盘后，点击关闭按钮不会退出工具。",
             style="SurfaceMuted.TLabel",
-            wraplength=290,
-        ).grid(row=13, column=0, sticky="w", pady=(12, 0))
+            wraplength=296,
+        ).grid(row=13, column=0, sticky="w", pady=(8, 0))
 
         brand = ttk.Frame(panel, style="Surface.TFrame")
-        brand.grid(row=15, column=0, sticky="ew", pady=(10, 0))
+        brand.grid(row=15, column=0, sticky="ew", pady=(6, 0))
         self.settings_brand = brand
         logo_path = RESOURCE_DIR / "blues19-brand-logo.png"
         try:
             with Image.open(logo_path) as source_logo:
-                logo = source_logo.convert("RGBA").resize((60, 60), Image.Resampling.LANCZOS)
+                logo = source_logo.convert("RGBA").resize((52, 52), Image.Resampling.LANCZOS)
             mask = Image.new("L", logo.size, 0)
-            ImageDraw.Draw(mask).ellipse((1, 1, 58, 58), fill=255)
+            ImageDraw.Draw(mask).ellipse((1, 1, 50, 50), fill=255)
             logo.putalpha(mask)
             self.brand_logo_photo = ImageTk.PhotoImage(logo)
             ttk.Label(brand, image=self.brand_logo_photo, style="Surface.TLabel").pack(
-                side="left", padx=(0, 12)
+                side="left", padx=(0, 10)
             )
         except OSError:
             pass
@@ -1228,7 +1236,7 @@ class App(TkinterDnD.Tk):
             background=self.SURFACE,
         ).pack(anchor="w")
         ttk.Label(brand_copy, text="微信公众号", style="SurfaceMuted.TLabel").pack(
-            anchor="w", pady=(4, 0)
+            anchor="w", pady=(2, 0)
         )
         GradientText(
             brand_copy,
@@ -1565,14 +1573,15 @@ class App(TkinterDnD.Tk):
             style="Muted.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(1, 0))
 
-        controls = ttk.Frame(root, style="Card.TFrame", padding=(9, 5))
+        controls = ttk.Frame(root, style="Card.TFrame", padding=(8, 5))
         controls.grid(row=1, column=0, sticky="ew", pady=(6, 5))
         controls.columnconfigure(2, weight=1)
+        self.controls = controls
         ttk.Label(controls, text="尾缀", style="SurfaceMuted.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Entry(controls, textvariable=self.suffix, width=13).grid(
-            row=0, column=1, sticky="w", padx=(6, 14)
+        ttk.Entry(controls, textvariable=self.suffix, width=10).grid(
+            row=0, column=1, sticky="w", padx=(5, 8)
         )
         mode_toggle = ModeToggle(
             controls,
@@ -1580,7 +1589,7 @@ class App(TkinterDnD.Tk):
             command=self.on_mode_change,
             canvas_bg=self.SURFACE,
         )
-        mode_toggle.grid(row=0, column=3, padx=(8, 12))
+        mode_toggle.grid(row=0, column=3, padx=(5, 8))
         self.action_buttons.append(mode_toggle)
 
         ttk.Checkbutton(
@@ -1588,25 +1597,26 @@ class App(TkinterDnD.Tk):
             text="完成后打开目录",
             variable=self.open_output_dir,
             style="Surface.TCheckbutton",
-        ).grid(row=0, column=4, padx=(0, 10))
+        ).grid(row=0, column=4, padx=(0, 6))
 
         write_button = RoundedButton(
             controls,
             text="写入标签",
             command=self.write_loaded,
-            width=88,
+            width=78,
             canvas_bg=self.SURFACE,
             primary=True,
         )
-        write_button.grid(row=0, column=5, padx=(0, 5))
+        write_button.grid(row=0, column=5, padx=(0, 3))
         clear_button = RoundedButton(
             controls,
             text="清除标签",
             command=self.clear_loaded,
-            width=88,
+            width=78,
             canvas_bg=self.SURFACE,
         )
-        clear_button.grid(row=0, column=6, padx=(0, 5))
+        clear_button.grid(row=0, column=6)
+        self.clear_button = clear_button
         self.action_buttons.extend((write_button, clear_button))
 
         result_section = ttk.Frame(root, style="Card.TFrame", padding=(9, 7))

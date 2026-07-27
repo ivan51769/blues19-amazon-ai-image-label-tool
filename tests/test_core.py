@@ -109,13 +109,16 @@ class ImageFilesTests(unittest.TestCase):
     def test_ui_layout_keeps_results_and_status_visible_at_minimum_size(self):
         root = app.App()
         try:
-            root.geometry("900x680")
+            root.geometry("760x680")
             root.update()
             window_bottom = root.winfo_rooty() + root.winfo_height()
             progress_bottom = root.progress.winfo_rooty() + root.progress.winfo_height()
+            controls_right = root.controls.winfo_rootx() + root.controls.winfo_width()
+            clear_right = root.clear_button.winfo_rootx() + root.clear_button.winfo_width()
 
             self.assertGreaterEqual(root.result_host.winfo_height(), 80)
             self.assertLessEqual(progress_bottom, window_bottom)
+            self.assertLessEqual(clear_right, controls_right)
             self.assertEqual(root.suffix.get(), "_AI标记")
             self.assertTrue(root.open_output_dir.get())
         finally:
@@ -163,13 +166,17 @@ class ImageFilesTests(unittest.TestCase):
     def test_settings_brand_stays_inside_panel_at_default_height(self):
         root = app.App()
         try:
-            root.geometry("760x720")
+            root.geometry("760x580")
             root.update()
             root._show_settings_panel()
             root.update()
             brand_bottom = root.settings_brand.winfo_rooty() + root.settings_brand.winfo_height()
             panel_bottom = root.settings_panel.winfo_rooty() + root.settings_panel.winfo_height()
             self.assertLessEqual(brand_bottom, panel_bottom)
+            self.assertLessEqual(
+                max(button.grid_info()["row"] for button in root.settings_theme_buttons),
+                1,
+            )
         finally:
             if root.winfo_exists():
                 root.quit_app()
