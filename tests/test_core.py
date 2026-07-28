@@ -13,18 +13,56 @@ SPEC.loader.exec_module(app)
 EXIFTOOL = app.EXIFTOOL
 image_files = app.image_files
 read_tagged = app.read_tagged
+read_metadata = app.read_metadata
 write_tag = app.write_tag
 clear_tag = app.clear_tag
 process_images = app.process_images
+sync_folder_custom_metadata = app.sync_folder_custom_metadata
 exiftool_messages = app.exiftool_messages
 
 
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+MP4_MINIMAL = bytes.fromhex(
+    "000000186674797069736F6D0000020069736F6D69736F32"
+    "000000086D646174"
+)
 
 
 class ImageFilesTests(unittest.TestCase):
+    @unittest.skipUnless(app.os.name == "nt", "Windows mutex is only used on Windows")
+    def test_single_instance_mutex_closes_duplicate_process(self):
+        kernel32 = mock.Mock()
+        kernel32.CreateMutexW.return_value = 123
+        with (
+            mock.patch.object(app.ctypes, "WinDLL", return_value=kernel32),
+            mock.patch.object(
+                app.ctypes,
+                "get_last_error",
+                return_value=app.ERROR_ALREADY_EXISTS,
+            ),
+        ):
+            handle, acquired = app.acquire_single_instance()
+
+        self.assertIsNone(handle)
+        self.assertFalse(acquired)
+        kernel32.CloseHandle.assert_called_once_with(123)
+
+    @unittest.skipUnless(app.os.name == "nt", "Windows mutex is only used on Windows")
+    def test_single_instance_mutex_keeps_first_process_running(self):
+        kernel32 = mock.Mock()
+        kernel32.CreateMutexW.return_value = 456
+        with (
+            mock.patch.object(app.ctypes, "WinDLL", return_value=kernel32),
+            mock.patch.object(app.ctypes, "get_last_error", return_value=0),
+        ):
+            handle, acquired = app.acquire_single_instance()
+
+        self.assertEqual(handle, 456)
+        self.assertTrue(acquired)
+        kernel32.CloseHandle.assert_not_called()
+
     def test_exiftool_forces_windows_wide_character_file_io(self):
         result = mock.Mock()
         with mock.patch.object(app, "run_exiftool", return_value=result) as run:
@@ -40,26 +78,38 @@ class ImageFilesTests(unittest.TestCase):
             [
                 "-charset",
                 "filename=UTF8",
+                "-charset",
+                "exiftool=UTF8",
                 "-api",
                 "WindowsWideFile=1",
-                "-j",
-                "-XMP-dc:Subject",
             ],
         )
+        self.assertEqual(arguments[-2], "-@")
 
     def test_filters_routine_exiftool_status_lines(self):
         messages = exiftool_messages("    2 image files read\nWarning: damaged metadata\n")
         self.assertEqual(messages, ["Warning: damaged metadata"])
 
-    def test_lists_only_supported_images_in_current_folder(self):
+    def test_lists_only_supported_media_in_current_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            for name in ["b.PNG", "a.jpg", "note.txt", "fake.jpg_original"]:
+            for name in [
+                "b.PNG",
+                "a.jpg",
+                "clip.mp4",
+                "short.MOV",
+                "note.txt",
+                "movie.avi",
+                "fake.jpg_original",
+            ]:
                 (folder / name).touch()
             (folder / "nested").mkdir()
             (folder / "nested" / "c.jpg").touch()
 
-            self.assertEqual([p.name for p in image_files(folder)], ["a.jpg", "b.PNG"])
+            self.assertEqual(
+                [p.name for p in image_files(folder)],
+                ["a.jpg", "b.PNG", "clip.mp4", "short.MOV"],
+            )
 
     @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
     def test_write_read_and_no_duplicate_tag(self):
@@ -77,6 +127,177 @@ class ImageFilesTests(unittest.TestCase):
             cleared, errors = clear_tag([image.resolve()])
             self.assertEqual(cleared, 1, errors)
             self.assertEqual(read_tagged([image.resolve()])[0], [])
+
+    @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
+    def test_optional_title_and_subject_are_written_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "metadata.png"
+            image.write_bytes(PNG_1X1)
+
+            updated, errors = write_tag(
+                [image.resolve()],
+                title="夏季碎花裙",
+                subject="女士连衣裙",
+            )
+            self.assertEqual(updated, 1, errors)
+
+            legacy_result = app.run_exiftool_files(
+                [
+                    "-XMP-dc:Subject+=女士连衣裙",
+                    "-overwrite_original_in_place",
+                ],
+                [image.resolve()],
+            )
+            self.assertEqual(legacy_result.returncode, 0, legacy_result.stderr)
+
+            updated_again, errors = write_tag(
+                [image.resolve()],
+                title="夏季碎花裙",
+                subject="女士连衣裙",
+            )
+            self.assertEqual(updated_again, 0, errors)
+
+            metadata, errors = read_metadata([image.resolve()])
+            self.assertFalse(errors)
+            values = metadata[image.resolve()]
+            self.assertEqual(values["title"], "夏季碎花裙")
+            self.assertEqual(values["subjects"].count(app.TAG), 1)
+            self.assertNotIn("女士连衣裙", values["subjects"])
+            self.assertEqual(values["windows_subject"], "女士连衣裙")
+
+            cleared, errors = clear_tag([image.resolve()])
+            self.assertEqual(cleared, 1, errors)
+            metadata, errors = read_metadata([image.resolve()])
+            self.assertFalse(errors)
+            cleared_values = metadata[image.resolve()]
+            self.assertEqual(cleared_values["title"], "")
+            self.assertEqual(cleared_values["subjects"], [])
+            self.assertEqual(cleared_values["windows_subject"], "")
+
+    @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
+    def test_write_read_and_clear_video_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(MP4_MINIMAL)
+
+            updated, errors = write_tag(
+                [video.resolve()],
+                title="短视频标题",
+                subject="短视频主题",
+            )
+            self.assertEqual(updated, 1, errors)
+            self.assertEqual(read_tagged([video.resolve()])[0], [video.resolve()])
+            metadata, errors = read_metadata([video.resolve()])
+            self.assertFalse(errors)
+            self.assertIn(app.TAG, metadata[video.resolve()]["windows_tags"])
+
+            cleared, errors = clear_tag([video.resolve()])
+            self.assertEqual(cleared, 1, errors)
+            self.assertEqual(read_tagged([video.resolve()])[0], [])
+            metadata, errors = read_metadata([video.resolve()])
+            self.assertFalse(errors)
+            self.assertEqual(metadata[video.resolve()]["title"], "")
+            self.assertEqual(metadata[video.resolve()]["subjects"], [])
+            self.assertNotIn(app.TAG, metadata[video.resolve()]["windows_tags"])
+
+    @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
+    def test_folder_metadata_sync_updates_all_images_without_adding_ai_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            tagged_image = folder / "tagged.png"
+            other_image = folder / "other.png"
+            video = folder / "clip.mp4"
+            nested = folder / "nested"
+            nested.mkdir()
+            nested_image = nested / "nested.png"
+            for image in (tagged_image, other_image, nested_image):
+                image.write_bytes(PNG_1X1)
+            video.write_bytes(MP4_MINIMAL)
+
+            updated, errors = write_tag([tagged_image.resolve()])
+            self.assertEqual(updated, 1, errors)
+
+            synced, errors = sync_folder_custom_metadata(
+                [tagged_image.resolve()],
+                title="夏季系列",
+                subject="碎花裙",
+            )
+            self.assertEqual(synced, 2, errors)
+
+            metadata, errors = read_metadata(
+                [
+                    tagged_image.resolve(),
+                    other_image.resolve(),
+                    video.resolve(),
+                    nested_image.resolve(),
+                ]
+            )
+            self.assertFalse(errors)
+            for image in (tagged_image.resolve(), other_image.resolve()):
+                self.assertEqual(metadata[image]["title"], "夏季系列")
+                self.assertNotIn("碎花裙", metadata[image]["subjects"])
+                self.assertEqual(metadata[image]["windows_subject"], "碎花裙")
+            self.assertEqual(metadata[video.resolve()]["title"], "")
+            self.assertEqual(metadata[nested_image.resolve()]["title"], "")
+            self.assertEqual(read_tagged([other_image.resolve()])[0], [])
+
+    def test_supported_video_copy_uses_same_tagging_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "clip.mp4"
+            source.write_bytes(b"video fixture")
+            destination = Path(tmp) / "clip_AI标记.mp4"
+
+            def tagged_side_effect(paths):
+                if paths and paths[0] == destination.resolve():
+                    return [destination.resolve()], []
+                return [], []
+
+            with (
+                mock.patch.object(app, "read_tagged", side_effect=tagged_side_effect),
+                mock.patch.object(app, "write_tag", return_value=(1, [])) as write,
+            ):
+                outputs, errors = process_images(
+                    [source],
+                    keep_source=True,
+                    suffix="_AI标记",
+                )
+
+            self.assertEqual(errors, [])
+            self.assertEqual(outputs, [destination.resolve()])
+            self.assertTrue(source.exists())
+            self.assertTrue(destination.exists())
+            write.assert_called_once_with(
+                [destination.resolve()],
+                title=None,
+                subject=None,
+            )
+
+    @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
+    def test_existing_tagged_video_gets_windows_tag_without_second_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip_AI标记.mp4"
+            video.write_bytes(MP4_MINIMAL)
+            result = app.run_exiftool_files(
+                [
+                    f"-XMP-dc:Subject+={app.TAG}",
+                    "-overwrite_original_in_place",
+                ],
+                [video.resolve()],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            outputs, errors = process_images(
+                [video],
+                keep_source=True,
+                suffix="_AI标记",
+            )
+
+            self.assertEqual(errors, [])
+            self.assertEqual(outputs, [video.resolve()])
+            self.assertFalse((Path(tmp) / "clip_AI标记_2.mp4").exists())
+            metadata, errors = read_metadata(outputs)
+            self.assertFalse(errors)
+            self.assertIn(app.TAG, metadata[video.resolve()]["windows_tags"])
 
     @unittest.skipUnless(EXIFTOOL.exists(), "ExifTool is not installed")
     def test_write_read_and_clear_in_unicode_directory(self):
@@ -115,12 +336,77 @@ class ImageFilesTests(unittest.TestCase):
             progress_bottom = root.progress.winfo_rooty() + root.progress.winfo_height()
             controls_right = root.controls.winfo_rootx() + root.controls.winfo_width()
             clear_right = root.clear_button.winfo_rootx() + root.clear_button.winfo_width()
+            subject_entry_right = (
+                root.custom_subject_entry.winfo_rootx()
+                + root.custom_subject_entry.winfo_width()
+            )
+            folder_check_right = (
+                root.folder_metadata_check.winfo_rootx()
+                + root.folder_metadata_check.winfo_width()
+            )
 
             self.assertGreaterEqual(root.result_host.winfo_height(), 80)
             self.assertLessEqual(progress_bottom, window_bottom)
             self.assertLessEqual(clear_right, controls_right)
+            self.assertLessEqual(subject_entry_right, controls_right)
+            self.assertLessEqual(folder_check_right, controls_right)
             self.assertEqual(root.suffix.get(), "_AI标记")
             self.assertTrue(root.open_output_dir.get())
+            self.assertFalse(root.custom_title_enabled.get())
+            self.assertFalse(root.custom_subject_enabled.get())
+            self.assertFalse(root.folder_metadata_enabled.get())
+            self.assertEqual(str(root.custom_title_entry.cget("state")), "disabled")
+            self.assertEqual(str(root.custom_subject_entry.cget("state")), "disabled")
+            style = app.ttk.Style(root)
+            self.assertEqual(
+                style.lookup(
+                    "Surface.TCheckbutton",
+                    "indicatorbackground",
+                    ("selected",),
+                ),
+                root.CHECK_ACTIVE,
+            )
+            self.assertEqual(
+                style.lookup(
+                    "Surface.TCheckbutton",
+                    "indicatorforeground",
+                    ("selected",),
+                ),
+                "#FFFFFF",
+            )
+
+            media = Path("sample.jpg")
+            root.result_paths = [media]
+            root.tag_status = {media: True}
+            root.metadata_info = {
+                media: {
+                    "title": "夏季标题",
+                    "subjects": [app.TAG],
+                    "windows_subject": "碎花裙主题",
+                }
+            }
+            root.render_results()
+            self.assertIsNotNone(root.result_tree)
+            self.assertEqual(
+                tuple(root.result_tree["displaycolumns"]),
+                ("tag", "title", "subject"),
+            )
+            self.assertEqual(root.result_tree.heading("tag")["text"], "标记")
+            self.assertEqual(root.result_tree.heading("title")["text"], "标题")
+            self.assertEqual(root.result_tree.heading("subject")["text"], "主题")
+            row = root.result_tree.get_children()[0]
+            values = root.result_tree.item(row, "values")
+            self.assertEqual(
+                values[:3],
+                (app.TAG, "夏季标题", "碎花裙主题"),
+            )
+
+            root.folder_metadata_enabled.set(True)
+            root.on_folder_metadata_toggle()
+            self.assertTrue(root.custom_title_enabled.get())
+            self.assertTrue(root.custom_subject_enabled.get())
+            self.assertEqual(str(root.custom_title_entry.cget("state")), "normal")
+            self.assertEqual(str(root.custom_subject_entry.cget("state")), "normal")
         finally:
             root.destroy()
 

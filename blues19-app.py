@@ -25,9 +25,13 @@ except ImportError:
 
 
 TAG = "contains-synthetic-performer"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.8"
 DEFAULT_SUFFIX = "_AI标记"
-EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+INSTANCE_MUTEX_NAME = r"Local\blues19-amazon-ai-image-label-tool"
+ERROR_ALREADY_EXISTS = 183
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".3gp", ".3g2", ".f4v"}
+EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 APP_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 EXIFTOOL = RESOURCE_DIR / "tools" / "exiftool.exe"
@@ -37,6 +41,7 @@ SETTINGS_FILE = (
     / "blues19-ai-image-label-tool"
     / "blues19-settings.json"
 )
+_INSTANCE_MUTEX_HANDLE: int | None = None
 THEMES = {
     "RainbowText": {
         "name": "冰川蓝",
@@ -185,9 +190,22 @@ def apply_windows_glass(
 
 
 def image_files(folder: Path) -> list[Path]:
+    """Return supported image and video files from one folder."""
     return sorted(
         (p.resolve() for p in folder.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS),
         key=lambda p: p.name.lower(),
+    )
+
+
+def folder_image_files(folder: Path) -> list[Path]:
+    """Return only supported images from one folder."""
+    return sorted(
+        (
+            path.resolve()
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ),
+        key=lambda path: path.name.lower(),
     )
 
 
@@ -198,6 +216,15 @@ def validate_suffix(value: str) -> str:
     if re.search(r'[<>:"/\\|?*]', suffix) or suffix.endswith((".", " ")):
         raise ValueError('文件名尾缀不能包含 < > : " / \\ | ? *，也不能以点或空格结尾。')
     return suffix
+
+
+def validate_metadata_value(value: str, label: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{label}内容不能为空。")
+    if "\r" in cleaned or "\n" in cleaned:
+        raise ValueError(f"{label}内容不能包含换行。")
+    return cleaned
 
 
 def suffixed_path(source: Path, suffix: str) -> Path:
@@ -230,8 +257,15 @@ def run_exiftool(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def run_exiftool_files(args: list[str], paths: list[Path]) -> subprocess.CompletedProcess[str]:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".args", delete=False) as handle:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8-sig",
+        suffix=".args",
+        delete=False,
+    ) as handle:
         arg_file = Path(handle.name)
+        for argument in args:
+            handle.write(argument + "\n")
         for path in paths:
             handle.write(str(path) + "\n")
     try:
@@ -239,9 +273,10 @@ def run_exiftool_files(args: list[str], paths: list[Path]) -> subprocess.Complet
             [
                 "-charset",
                 "filename=UTF8",
+                "-charset",
+                "exiftool=UTF8",
                 "-api",
                 "WindowsWideFile=1",
-                *args,
                 "-@",
                 str(arg_file),
             ]
@@ -255,14 +290,40 @@ def exiftool_messages(stderr: str) -> list[str]:
     return [line.strip() for line in stderr.splitlines() if line.strip() and not routine.match(line)]
 
 
-def read_tagged(paths: list[Path]) -> tuple[list[Path], list[str]]:
+def acquire_single_instance() -> tuple[int | None, bool]:
+    if os.name != "nt":
+        return None, True
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.CreateMutexW(None, False, INSTANCE_MUTEX_NAME)
+    if not handle:
+        return None, True
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None, False
+    return int(handle), True
+
+
+def read_metadata(paths: list[Path]) -> tuple[dict[Path, dict[str, object]], list[str]]:
     if not paths:
-        return [], []
-    tagged: list[Path] = []
+        return {}, []
+    metadata: dict[Path, dict[str, object]] = {}
     errors: list[str] = []
     for start in range(0, len(paths), CHUNK_SIZE):
         chunk = paths[start : start + CHUNK_SIZE]
-        result = run_exiftool_files(["-j", "-XMP-dc:Subject"], chunk)
+        result = run_exiftool_files(
+            [
+                "-j",
+                "-XMP-dc:Title",
+                "-XMP-dc:Subject",
+                "-EXIF:XPSubject",
+                "-Microsoft:Category",
+            ],
+            chunk,
+        )
         errors.extend(exiftool_messages(result.stderr))
         try:
             records = json.loads(result.stdout or "[]")
@@ -272,64 +333,302 @@ def read_tagged(paths: list[Path]) -> tuple[list[Path], list[str]]:
             subjects = record.get("Subject", [])
             if isinstance(subjects, str):
                 subjects = [subjects]
-            if TAG in subjects:
-                tagged.append(Path(record["SourceFile"]).resolve())
+            title = record.get("Title", "")
+            if isinstance(title, dict):
+                title = title.get("x-default", next(iter(title.values()), ""))
+            windows_tags = record.get("Category", [])
+            if isinstance(windows_tags, str):
+                windows_tags = [windows_tags]
+            metadata[Path(record["SourceFile"]).resolve()] = {
+                "title": str(title or ""),
+                "subjects": [str(subject) for subject in subjects],
+                "windows_subject": str(record.get("XPSubject", "") or ""),
+                "windows_tags": [str(tag) for tag in windows_tags],
+            }
+    return metadata, errors
+
+
+def read_tagged(paths: list[Path]) -> tuple[list[Path], list[str]]:
+    metadata, errors = read_metadata(paths)
+    tagged = [
+        path
+        for path, values in metadata.items()
+        if TAG in values.get("subjects", [])
+    ]
     return tagged, errors
 
 
-def write_tag(paths: list[Path]) -> tuple[int, list[str]]:
+def write_tag(
+    paths: list[Path],
+    *,
+    title: str | None = None,
+    subject: str | None = None,
+) -> tuple[int, list[str]]:
     if not paths:
         return 0, []
-    already_tagged, errors = read_tagged(paths)
-    tagged_set = set(already_tagged)
+    title = validate_metadata_value(title, "标题") if title else None
+    subject = validate_metadata_value(subject, "主题") if subject else None
+    if subject == TAG:
+        subject = None
+    existing_metadata, errors = read_metadata(paths)
+    tagged_set = {
+        path
+        for path, values in existing_metadata.items()
+        if TAG in values.get("subjects", [])
+    }
     pending = [p for p in paths if p not in tagged_set]
-    for start in range(0, len(pending), CHUNK_SIZE):
-        chunk = pending[start : start + CHUNK_SIZE]
-        result = run_exiftool_files(
-            [f"-XMP-dc:Subject+={TAG}", "-overwrite_original_in_place"], chunk
-        )
-        errors.extend(exiftool_messages(result.stderr))
+    grouped_targets: dict[tuple[str, ...], list[Path]] = {}
+    for path in paths:
+        values = existing_metadata.get(path, {})
+        current_subjects = values.get("subjects", [])
+        current_windows_tags = values.get("windows_tags", [])
+        arguments: list[str] = []
+        if TAG not in current_subjects:
+            arguments.append(f"-XMP-dc:Subject+={TAG}")
+        if (
+            path.suffix.lower() in VIDEO_EXTENSIONS
+            and TAG not in current_windows_tags
+        ):
+            arguments.append(f"-Microsoft:Category+={TAG}")
+        if title and values.get("title") != title:
+            arguments.append(f"-XMP-dc:Title={title}")
+        if (
+            subject
+            and path.suffix.lower() in VIDEO_EXTENSIONS
+            and subject not in current_subjects
+        ):
+            arguments.append(f"-XMP-dc:Subject+={subject}")
+        if subject and path.suffix.lower() in IMAGE_EXTENSIONS:
+            legacy_subjects = {
+                subject,
+                str(values.get("windows_subject", "") or ""),
+            }
+            for legacy_subject in legacy_subjects:
+                if (
+                    legacy_subject
+                    and legacy_subject != TAG
+                    and legacy_subject in current_subjects
+                ):
+                    arguments.append(f"-XMP-dc:Subject-={legacy_subject}")
+            if values.get("windows_subject") != subject:
+                arguments.append(f"-EXIF:XPSubject={subject}")
+        if arguments:
+            grouped_targets.setdefault(tuple(arguments), []).append(path)
+
+    for metadata_arguments, targets in grouped_targets.items():
+        for start in range(0, len(targets), CHUNK_SIZE):
+            chunk = targets[start : start + CHUNK_SIZE]
+            result = run_exiftool_files(
+                [*metadata_arguments, "-overwrite_original_in_place"],
+                chunk,
+            )
+            errors.extend(exiftool_messages(result.stderr))
     verified, verify_errors = read_tagged(pending)
     errors.extend(verify_errors)
+    video_paths = [path for path in paths if path.suffix.lower() in VIDEO_EXTENSIONS]
+    if title or subject or video_paths:
+        metadata, metadata_errors = read_metadata(paths)
+        errors.extend(metadata_errors)
+        for path in paths:
+            values = metadata.get(path, {})
+            if (
+                path.suffix.lower() in VIDEO_EXTENSIONS
+                and TAG not in values.get("windows_tags", [])
+            ):
+                errors.append(f"Windows 视频标记写入后复查失败：{path}")
+            if title and values.get("title") != title:
+                errors.append(f"标题写入后复查失败：{path}")
+            if subject and path.suffix.lower() in IMAGE_EXTENSIONS:
+                if values.get("windows_subject") != subject:
+                    errors.append(f"Windows 主题写入后复查失败：{path}")
+                if subject in values.get("subjects", []):
+                    errors.append(f"图片主题仍重复出现在标记中：{path}")
+            if (
+                subject
+                and path.suffix.lower() in VIDEO_EXTENSIONS
+                and subject not in values.get("subjects", [])
+            ):
+                errors.append(f"视频主题写入后复查失败：{path}")
     return len(verified), errors
+
+
+def write_custom_metadata(
+    paths: list[Path],
+    *,
+    title: str,
+    subject: str,
+) -> tuple[int, list[str]]:
+    if not paths:
+        return 0, []
+    title = validate_metadata_value(title, "标题")
+    subject = validate_metadata_value(subject, "主题")
+    if subject == TAG:
+        raise ValueError("同目录主题不能使用 AI 标签关键词。")
+
+    existing_metadata, errors = read_metadata(paths)
+    grouped_targets: dict[tuple[str, ...], list[Path]] = {}
+    for path in paths:
+        values = existing_metadata.get(path, {})
+        arguments: list[str] = []
+        if values.get("title") != title:
+            arguments.append(f"-XMP-dc:Title={title}")
+        current_subjects = values.get("subjects", [])
+        if path.suffix.lower() in VIDEO_EXTENSIONS and subject not in current_subjects:
+            arguments.append(f"-XMP-dc:Subject+={subject}")
+        if path.suffix.lower() in IMAGE_EXTENSIONS:
+            legacy_subjects = {
+                subject,
+                str(values.get("windows_subject", "") or ""),
+            }
+            for legacy_subject in legacy_subjects:
+                if (
+                    legacy_subject
+                    and legacy_subject != TAG
+                    and legacy_subject in current_subjects
+                ):
+                    arguments.append(f"-XMP-dc:Subject-={legacy_subject}")
+            if values.get("windows_subject") != subject:
+                arguments.append(f"-EXIF:XPSubject={subject}")
+        if arguments:
+            grouped_targets.setdefault(tuple(arguments), []).append(path)
+
+    for metadata_arguments, targets in grouped_targets.items():
+        for start in range(0, len(targets), CHUNK_SIZE):
+            result = run_exiftool_files(
+                [*metadata_arguments, "-overwrite_original_in_place"],
+                targets[start : start + CHUNK_SIZE],
+            )
+            errors.extend(exiftool_messages(result.stderr))
+
+    verified_metadata, verify_errors = read_metadata(paths)
+    errors.extend(verify_errors)
+    verified = 0
+    for path in paths:
+        values = verified_metadata.get(path, {})
+        if path.suffix.lower() in IMAGE_EXTENSIONS:
+            subject_matches = (
+                values.get("windows_subject") == subject
+                and subject not in values.get("subjects", [])
+            )
+        else:
+            subject_matches = subject in values.get("subjects", [])
+        if (
+            values.get("title") == title
+            and subject_matches
+        ):
+            verified += 1
+        else:
+            errors.append(f"同目录标题或主题写入后复查失败：{path}")
+    return verified, errors
+
+
+def sync_folder_custom_metadata(
+    tagged_outputs: list[Path],
+    *,
+    title: str,
+    subject: str,
+) -> tuple[int, list[str]]:
+    folders = {path.resolve().parent for path in tagged_outputs}
+    folder_images = list(
+        dict.fromkeys(
+            image
+            for folder in folders
+            for image in folder_image_files(folder)
+        )
+    )
+    return write_custom_metadata(folder_images, title=title, subject=subject)
 
 
 def clear_tag(paths: list[Path]) -> tuple[int, list[str]]:
     if not paths:
         return 0, []
-    errors: list[str] = []
-    tagged, read_errors = read_tagged(paths)
-    errors.extend(read_errors)
-    for start in range(0, len(tagged), CHUNK_SIZE):
-        chunk = tagged[start : start + CHUNK_SIZE]
-        result = run_exiftool_files(
-            [f"-XMP-dc:Subject-={TAG}", "-overwrite_original_in_place"], chunk
-        )
-        errors.extend(exiftool_messages(result.stderr))
-    remaining, verify_errors = read_tagged(tagged)
+    existing_metadata, errors = read_metadata(paths)
+    targets = [
+        path
+        for path in paths
+        if existing_metadata.get(path, {}).get("title")
+        or existing_metadata.get(path, {}).get("subjects")
+        or existing_metadata.get(path, {}).get("windows_subject")
+        or TAG in existing_metadata.get(path, {}).get("windows_tags", [])
+    ]
+    image_targets = [path for path in targets if path.suffix.lower() in IMAGE_EXTENSIONS]
+    video_targets = [path for path in targets if path.suffix.lower() in VIDEO_EXTENSIONS]
+    for target_group, arguments in (
+        (
+            image_targets,
+            ["-XMP-dc:Subject=", "-XMP-dc:Title=", "-EXIF:XPSubject="],
+        ),
+        (
+            video_targets,
+            [
+                "-XMP-dc:Subject=",
+                "-XMP-dc:Title=",
+                f"-Microsoft:Category-={TAG}",
+            ],
+        ),
+    ):
+        for start in range(0, len(target_group), CHUNK_SIZE):
+            chunk = target_group[start : start + CHUNK_SIZE]
+            result = run_exiftool_files(
+                [*arguments, "-overwrite_original_in_place"],
+                chunk,
+            )
+            errors.extend(exiftool_messages(result.stderr))
+
+    remaining_metadata, verify_errors = read_metadata(targets)
     errors.extend(verify_errors)
-    remaining_set = set(remaining)
-    cleared = len([path for path in tagged if path not in remaining_set])
+    cleared = 0
+    for path in targets:
+        values = remaining_metadata.get(path, {})
+        if (
+            not values.get("title")
+            and not values.get("subjects")
+            and not values.get("windows_subject")
+            and TAG not in values.get("windows_tags", [])
+        ):
+            cleared += 1
+        else:
+            errors.append(f"标签、标题或主题清除后复查失败：{path}")
     return cleared, errors
 
 
-def process_images(paths: list[Path], keep_source: bool, suffix: str) -> tuple[list[Path], list[str]]:
+def process_images(
+    paths: list[Path],
+    keep_source: bool,
+    suffix: str,
+    *,
+    title: str | None = None,
+    subject: str | None = None,
+) -> tuple[list[Path], list[str]]:
     suffix = validate_suffix(suffix)
     outputs: list[Path] = []
     errors: list[str] = []
     for source in paths:
         source = source.resolve()
         try:
-            tagged, read_errors = read_tagged([source])
+            source_metadata, read_errors = read_metadata([source])
             errors.extend(read_errors)
-            if source.stem.endswith(suffix) and tagged:
+            source_values = source_metadata.get(source, {})
+            source_is_tagged = TAG in source_values.get("subjects", [])
+            if (
+                source.stem.endswith(suffix)
+                and source_is_tagged
+                and not title
+                and not subject
+            ):
+                if (
+                    source.suffix.lower() in VIDEO_EXTENSIONS
+                    and TAG not in source_values.get("windows_tags", [])
+                ):
+                    _, write_errors = write_tag([source])
+                    errors.extend(write_errors)
                 outputs.append(source)
                 continue
 
             destination = suffixed_path(source, suffix)
             if keep_source:
                 shutil.copy2(source, destination)
-                _, write_errors = write_tag([destination])
+                _, write_errors = write_tag([destination], title=title, subject=subject)
                 errors.extend(write_errors)
                 verified, verify_errors = read_tagged([destination])
                 errors.extend(verify_errors)
@@ -338,7 +637,7 @@ def process_images(paths: list[Path], keep_source: bool, suffix: str) -> tuple[l
                     errors.append(f"写入后复查失败：{source}")
                     continue
             else:
-                _, write_errors = write_tag([source])
+                _, write_errors = write_tag([source], title=title, subject=subject)
                 errors.extend(write_errors)
                 verified, verify_errors = read_tagged([source])
                 errors.extend(verify_errors)
@@ -640,6 +939,8 @@ class App(TkinterDnD.Tk):
     ACTIVE = "#274C63"
     THEME_RAINBOW = ("#FF892F", "#FF3091", "#9E4BFF", "#46C4FF")
     SUCCESS = "#167A3A"
+    CHECK_ACTIVE = "#22A866"
+    CHECK_HOVER = "#198C53"
     WARNING = "#9A6700"
 
     def __init__(self) -> None:
@@ -651,7 +952,7 @@ class App(TkinterDnD.Tk):
             except (AttributeError, OSError, tk.TclError):
                 pass
         self.title(
-            f"blues19-亚马逊 AI 人物图片标签工具 v{APP_VERSION} · 拾玖Blues"
+            f"blues19-亚马逊 AI 人物媒体标签工具 v{APP_VERSION} · 拾玖Blues"
         )
         self.geometry("760x720")
         self.minsize(720, 580)
@@ -679,9 +980,14 @@ class App(TkinterDnD.Tk):
         self._apply_text_tokens()
         self.configure(background=self.CANVAS)
         self.folder = tk.StringVar(value=str(Path.home() / "Desktop"))
-        self.status = tk.StringVar(value="就绪 · 请拖入图片或文件夹")
+        self.status = tk.StringVar(value="就绪 · 请拖入图片、视频或文件夹")
         self.result_count = tk.StringVar(value="尚未扫描")
         self.suffix = tk.StringVar(value=DEFAULT_SUFFIX)
+        self.custom_title_enabled = tk.BooleanVar(value=False)
+        self.custom_subject_enabled = tk.BooleanVar(value=False)
+        self.folder_metadata_enabled = tk.BooleanVar(value=False)
+        self.custom_title = tk.StringVar()
+        self.custom_subject = tk.StringVar()
         self.mode_value = tk.DoubleVar(value=1.0)
         self.mode_text = tk.StringVar(value="保留源文件，生成带尾缀副本")
         self.open_output_dir = tk.BooleanVar(value=True)
@@ -690,6 +996,7 @@ class App(TkinterDnD.Tk):
         self.loaded_paths: list[Path] = []
         self.result_paths: list[Path] = []
         self.tag_status: dict[Path, bool | None] = {}
+        self.metadata_info: dict[Path, dict[str, object]] = {}
         self.photo_refs: list[ImageTk.PhotoImage] = []
         self.action_buttons: list[tk.Widget] = []
         self.workflow_badges: list[tk.Label] = []
@@ -876,6 +1183,34 @@ class App(TkinterDnD.Tk):
             background=self.SURFACE,
             foreground=self.TEXT_BODY,
             focuscolor=self.ACTION,
+            indicatorbackground=self.SURFACE,
+            indicatorforeground=self.TEXT_BODY,
+            upperbordercolor=self.BORDER,
+            lowerbordercolor=self.BORDER,
+        )
+        style.map(
+            "Surface.TCheckbutton",
+            background=[("active", self.SURFACE)],
+            foreground=[("disabled", self.TEXT_MUTED)],
+            indicatorbackground=[
+                ("selected active", self.CHECK_HOVER),
+                ("selected", self.CHECK_ACTIVE),
+                ("!selected", self.SURFACE),
+            ],
+            indicatorforeground=[
+                ("selected", "#FFFFFF"),
+                ("!selected", self.TEXT_BODY),
+            ],
+            upperbordercolor=[
+                ("selected active", self.CHECK_HOVER),
+                ("selected", self.CHECK_ACTIVE),
+                ("!selected", self.BORDER),
+            ],
+            lowerbordercolor=[
+                ("selected active", self.CHECK_HOVER),
+                ("selected", self.CHECK_ACTIVE),
+                ("!selected", self.BORDER),
+            ],
         )
         style.configure(
             "Horizontal.TScale",
@@ -1025,7 +1360,7 @@ class App(TkinterDnD.Tk):
             bubble_font = ImageFont.load_default()
         draw.text(
             (high_size / 2, 34 * scale),
-            "拖入图片",
+            "拖入媒体",
             fill="#FFFFFF",
             font=bubble_font,
             anchor="mm",
@@ -1403,7 +1738,7 @@ class App(TkinterDnD.Tk):
         self.tray_icon = pystray.Icon(
             "blues19-ai-image-label-tool",
             self._tray_icon_image(),
-            "blues19 AI 人物图片标签",
+            "blues19 AI 人物媒体标签",
             menu,
         )
         try:
@@ -1548,7 +1883,7 @@ class App(TkinterDnD.Tk):
         header = ttk.Frame(root)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="AI 人物图片标签", style="Header.TLabel").grid(
+        ttk.Label(header, text="AI 人物媒体标签", style="Header.TLabel").grid(
             row=0, column=0, sticky="w"
         )
         settings_button = tk.Button(
@@ -1569,7 +1904,7 @@ class App(TkinterDnD.Tk):
         settings_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
         ttk.Label(
             header,
-            text=f"写入标签：XMP dc:subject = {TAG}",
+            text=f"图片 / 视频写入：XMP dc:subject = {TAG}",
             style="Muted.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(1, 0))
 
@@ -1619,6 +1954,47 @@ class App(TkinterDnD.Tk):
         self.clear_button = clear_button
         self.action_buttons.extend((write_button, clear_button))
 
+        metadata_row = ttk.Frame(controls, style="Surface.TFrame")
+        metadata_row.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(5, 0))
+        metadata_row.columnconfigure(1, weight=1)
+        metadata_row.columnconfigure(3, weight=1)
+        ttk.Checkbutton(
+            metadata_row,
+            text="标题",
+            variable=self.custom_title_enabled,
+            command=self.on_custom_metadata_toggle,
+            style="Surface.TCheckbutton",
+        ).grid(row=0, column=0, sticky="w")
+        self.custom_title_entry = ttk.Entry(
+            metadata_row,
+            textvariable=self.custom_title,
+            width=20,
+            state="normal" if self.custom_title_enabled.get() else "disabled",
+        )
+        self.custom_title_entry.grid(row=0, column=1, sticky="ew", padx=(4, 12))
+        ttk.Checkbutton(
+            metadata_row,
+            text="主题",
+            variable=self.custom_subject_enabled,
+            command=self.on_custom_metadata_toggle,
+            style="Surface.TCheckbutton",
+        ).grid(row=0, column=2, sticky="w")
+        self.custom_subject_entry = ttk.Entry(
+            metadata_row,
+            textvariable=self.custom_subject,
+            width=24,
+            state="normal" if self.custom_subject_enabled.get() else "disabled",
+        )
+        self.custom_subject_entry.grid(row=0, column=3, sticky="ew", padx=(4, 10))
+        self.folder_metadata_check = ttk.Checkbutton(
+            metadata_row,
+            text="同目录全部图片",
+            variable=self.folder_metadata_enabled,
+            command=self.on_folder_metadata_toggle,
+            style="Surface.TCheckbutton",
+        )
+        self.folder_metadata_check.grid(row=0, column=4, sticky="e")
+
         result_section = ttk.Frame(root, style="Card.TFrame", padding=(9, 7))
         result_section.grid(row=2, column=0, sticky="nsew")
         result_section.columnconfigure(0, weight=1)
@@ -1626,7 +2002,7 @@ class App(TkinterDnD.Tk):
 
         result_toolbar = ttk.Frame(result_section, style="Surface.TFrame")
         result_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        ttk.Label(result_toolbar, text="图片清单", style="Section.TLabel").pack(side="left")
+        ttk.Label(result_toolbar, text="媒体清单", style="Section.TLabel").pack(side="left")
         ttk.Label(result_toolbar, textvariable=self.result_count, style="SurfaceMuted.TLabel").pack(
             side="left", padx=(8, 0)
         )
@@ -1971,58 +2347,60 @@ class App(TkinterDnD.Tk):
 
     def on_drop_enter(self, _event) -> str:
         if not self.busy:
-            self.status.set("松开即可载入图片或文件夹")
+            self.status.set("松开即可载入图片、视频或文件夹")
         return "copy"
 
     def on_drop(self, event) -> str:
         if self.busy:
-            self.status.set("正在处理图片，请完成后再拖入")
+            self.status.set("正在处理媒体，请完成后再拖入")
             return "refuse_drop"
 
         paths = [Path(item).resolve() for item in self.tk.splitlist(event.data)]
         folders = [path for path in paths if path.is_dir()]
-        images = [path for path in paths if path.is_file() and path.suffix.lower() in EXTENSIONS]
+        media = [path for path in paths if path.is_file() and path.suffix.lower() in EXTENSIONS]
 
         if folders:
             if len(paths) != 1:
                 self.status.set("未载入 · 请单独拖入一个文件夹")
                 return "copy"
-            images = image_files(folders[0])
+            media = image_files(folders[0])
 
-        if not images:
-            self.status.set("未载入 · 拖入的内容不包含支持的图片")
+        if not media:
+            self.status.set("未载入 · 拖入的内容不包含支持的图片或视频")
             return "copy"
 
-        self.loaded_paths = list(dict.fromkeys(images))
+        self.loaded_paths = list(dict.fromkeys(media))
         self.result_paths = self.loaded_paths.copy()
         self.tag_status = {path: None for path in self.loaded_paths}
+        self.metadata_info = {}
         self.render_results()
         self.refresh_tag_status()
         return "copy"
 
     def on_bubble_drop(self, event) -> str:
         if self.busy:
-            self.status.set("正在处理图片，请完成后再拖入")
+            self.status.set("正在处理媒体，请完成后再拖入")
             return "refuse_drop"
 
         paths = [Path(item).resolve() for item in self.tk.splitlist(event.data)]
         folders = [path for path in paths if path.is_dir()]
-        images = [path for path in paths if path.is_file() and path.suffix.lower() in EXTENSIONS]
+        media = [path for path in paths if path.is_file() and path.suffix.lower() in EXTENSIONS]
         if folders:
             if len(paths) != 1:
                 self.status.set("未写入 · 请单独拖入一个文件夹")
                 return "copy"
-            images = image_files(folders[0])
-        if not images:
-            self.status.set("未写入 · 拖入的内容不包含支持的图片")
+            media = image_files(folders[0])
+        if not media:
+            self.status.set("未写入 · 拖入的内容不包含支持的图片或视频")
             return "copy"
 
-        unique_images = list(dict.fromkeys(images))
-        self.loaded_paths = unique_images
-        self.result_paths = unique_images.copy()
-        self.tag_status = {path: None for path in unique_images}
+        unique_media = list(dict.fromkeys(media))
+        self.loaded_paths = unique_media
+        self.result_paths = unique_media.copy()
+        self.tag_status = {path: None for path in unique_media}
+        self.metadata_info = {}
         self.render_results()
-        self._write(unique_images, on_completed=self.show_bubble_success)
+        self._write(unique_media, on_completed=self.show_bubble_success)
         return "copy"
 
     def show_bubble_success(self) -> None:
@@ -2065,6 +2443,24 @@ class App(TkinterDnD.Tk):
         self.mode_value.set(1.0 if keep else 0.0)
         self.mode_text.set("保留源文件，生成带尾缀副本" if keep else "写入原文件，并添加尾缀重命名")
 
+    def on_custom_metadata_toggle(self) -> None:
+        if self.folder_metadata_enabled.get() and not (
+            self.custom_title_enabled.get() and self.custom_subject_enabled.get()
+        ):
+            self.folder_metadata_enabled.set(False)
+        self.custom_title_entry.configure(
+            state="normal" if self.custom_title_enabled.get() else "disabled"
+        )
+        self.custom_subject_entry.configure(
+            state="normal" if self.custom_subject_enabled.get() else "disabled"
+        )
+
+    def on_folder_metadata_toggle(self) -> None:
+        if self.folder_metadata_enabled.get():
+            self.custom_title_enabled.set(True)
+            self.custom_subject_enabled.set(True)
+        self.on_custom_metadata_toggle()
+
     def on_thumb_change(self, _value: str = "") -> None:
         self.size_label.configure(text=f"{int(self.thumb_size.get())} px")
         if self.thumb_after_id:
@@ -2074,28 +2470,42 @@ class App(TkinterDnD.Tk):
 
     def write_loaded(self) -> None:
         if not self.loaded_paths:
-            self.status.set("请先把图片或文件夹拖入主窗口或悬浮窗")
+            self.status.set("请先把图片、视频或文件夹拖入主窗口或悬浮窗")
             return
         self._write(self.loaded_paths.copy())
 
     def clear_loaded(self) -> None:
         if not self.loaded_paths:
-            self.status.set("请先拖入需要清除标签的图片")
+            self.status.set("请先拖入需要清除标签的图片或视频")
             return
         paths = self.loaded_paths.copy()
 
         def worker():
-            return clear_tag(paths)
+            cleared, errors = clear_tag(paths)
+            metadata, read_errors = read_metadata(paths)
+            return cleared, errors + read_errors, metadata
 
         def finished(payload) -> None:
-            cleared, errors = payload
-            self.tag_status.update({path: False for path in paths})
+            cleared, errors, metadata = payload
+            self.tag_status.update(
+                {
+                    path: TAG in metadata.get(path, {}).get("subjects", [])
+                    for path in paths
+                }
+            )
+            self.metadata_info = metadata
             self.result_paths = paths
             self.render_results()
             suffix = f" · {len(errors)} 条提示" if errors else ""
-            self.status.set(f"清除完成 · {cleared} 张图片已移除 AI 标签{suffix}")
+            self.status.set(
+                f"清除完成 · {cleared} 个文件已移除标签、标题和主题{suffix}"
+            )
 
-        self.run_background(f"正在清除 {len(paths)} 张图片的 AI 标签", worker, finished)
+        self.run_background(
+            f"正在清除 {len(paths)} 个文件的标签、标题和主题",
+            worker,
+            finished,
+        )
 
     def refresh_tag_status(self) -> None:
         if not self.loaded_paths:
@@ -2103,45 +2513,66 @@ class App(TkinterDnD.Tk):
         paths = self.loaded_paths.copy()
 
         def worker():
-            return read_tagged(paths)
+            return read_metadata(paths)
 
         def finished(payload) -> None:
-            tagged, errors = payload
-            tagged_set = set(tagged)
-            self.tag_status = {path: path in tagged_set for path in paths}
+            metadata, errors = payload
+            self.metadata_info = metadata
+            self.tag_status = {
+                path: TAG in metadata.get(path, {}).get("subjects", [])
+                for path in paths
+            }
             self.result_paths = paths
             self.render_results()
+            tagged_count = sum(self.tag_status.values())
             suffix = f" · {len(errors)} 条提示" if errors else ""
-            self.status.set(f"已载入 {len(paths)} 张图片 · {len(tagged)} 张已带 AI 标签{suffix}")
+            self.status.set(
+                f"已载入 {len(paths)} 个文件 · {tagged_count} 个已带 AI 标签{suffix}"
+            )
 
-        self.run_background(f"正在读取 {len(paths)} 张图片的标签信息", worker, finished)
+        self.run_background(f"正在读取 {len(paths)} 个文件的标签信息", worker, finished)
 
     def scan_loaded(self) -> None:
         if not self.loaded_paths:
-            self.status.set("请先拖入需要读取标签的图片")
+            self.status.set("请先拖入需要读取标签的图片或视频")
             return
         paths = self.loaded_paths.copy()
 
         def worker():
-            return read_tagged(paths)
+            metadata, errors = read_metadata(paths)
+            tagged = [
+                path
+                for path in paths
+                if TAG in metadata.get(path, {}).get("subjects", [])
+            ]
+            return tagged, errors, metadata
 
         def finished(payload) -> None:
-            tagged, errors = payload
+            tagged, errors, metadata = payload
+            self.metadata_info = metadata
             self.result_paths = tagged
             self.render_results()
             suffix = f" · {len(errors)} 条提示" if errors else ""
-            self.status.set(f"核验完成 · {len(paths)} 张图片中有 {len(tagged)} 张带 AI 标签{suffix}")
+            self.status.set(
+                f"核验完成 · {len(paths)} 个文件中有 {len(tagged)} 个带 AI 标签{suffix}"
+            )
 
-        self.run_background(f"正在核验 {len(paths)} 张图片的 AI 标签", worker, finished)
+        self.run_background(f"正在核验 {len(paths)} 个文件的 AI 标签", worker, finished)
 
     def write_selected(self) -> None:
         folder = self.current_folder()
         if not folder:
             return
         selected = filedialog.askopenfilenames(
-            title="选择要写入标签的图片",
+            title="选择要写入标签的图片或视频",
             initialdir=folder,
-            filetypes=[("支持的图片", "*.jpg *.jpeg *.png *.webp *.tif *.tiff")],
+            filetypes=[
+                (
+                    "支持的媒体",
+                    "*.jpg *.jpeg *.png *.webp *.tif *.tiff "
+                    "*.mp4 *.mov *.m4v *.3gp *.3g2 *.f4v",
+                )
+            ],
         )
         files = [Path(p).resolve() for p in selected]
         self._write(files)
@@ -2152,33 +2583,80 @@ class App(TkinterDnD.Tk):
             return
         files = image_files(folder)
         if not files:
-            self.status.set("当前文件夹内没有支持的图片")
+            self.status.set("当前文件夹内没有支持的图片或视频")
             return
         self._write(files)
+
+    def _selected_custom_metadata(self) -> tuple[str | None, str | None, bool]:
+        folder_metadata = self.folder_metadata_enabled.get()
+        if folder_metadata and not (
+            self.custom_title_enabled.get() and self.custom_subject_enabled.get()
+        ):
+            raise ValueError("同目录写入需要同时启用标题和主题。")
+        title = (
+            validate_metadata_value(self.custom_title.get(), "标题")
+            if self.custom_title_enabled.get()
+            else None
+        )
+        subject = (
+            validate_metadata_value(self.custom_subject.get(), "主题")
+            if self.custom_subject_enabled.get()
+            else None
+        )
+        if folder_metadata and subject == TAG:
+            raise ValueError("同目录主题不能使用 AI 标签关键词。")
+        return title, subject, folder_metadata
 
     def _write(self, files: list[Path], on_completed=None) -> None:
         if not files:
             return
         try:
             suffix = validate_suffix(self.suffix.get())
+            title, subject, folder_metadata = self._selected_custom_metadata()
         except Exception as exc:
-            self.status.set(f"尾缀不可用 · {exc}")
+            self.status.set(f"写入设置不可用 · {exc}")
             return
         keep_source = self.mode_value.get() >= 0.5
 
         def worker():
-            return process_images(files, keep_source, suffix)
+            outputs, errors = process_images(
+                files,
+                keep_source,
+                suffix,
+                title=title,
+                subject=subject,
+            )
+            synced_images = 0
+            if folder_metadata and outputs and title and subject:
+                synced_images, sync_errors = sync_folder_custom_metadata(
+                    outputs,
+                    title=title,
+                    subject=subject,
+                )
+                errors.extend(sync_errors)
+            metadata, read_errors = read_metadata(outputs)
+            return outputs, errors + read_errors, metadata, synced_images
 
         def finished(payload) -> None:
-            outputs, errors = payload
+            outputs, errors, metadata, synced_images = payload
             self.loaded_paths = outputs
             self.result_paths = outputs
             self.tag_status = {path: True for path in outputs}
+            self.metadata_info = metadata
             self.render_results()
+            sync_text = (
+                f" · 同目录 {synced_images} 张图片已写标题/主题"
+                if folder_metadata
+                else ""
+            )
             if errors:
-                self.status.set(f"已完成 · 成功 {len(outputs)} 张，另有 {len(errors)} 条警告")
+                self.status.set(
+                    f"已完成 · 成功 {len(outputs)} 个{sync_text}，另有 {len(errors)} 条警告"
+                )
             else:
-                self.status.set(f"写入并核验完成 · {len(outputs)} 张图片已带标签")
+                self.status.set(
+                    f"写入并核验完成 · {len(outputs)} 个文件已带标签{sync_text}"
+                )
             if outputs and on_completed is not None:
                 on_completed()
             if outputs and self.open_output_dir.get():
@@ -2188,7 +2666,7 @@ class App(TkinterDnD.Tk):
                     self.status.set(f"写入完成 · 无法自动打开输出目录：{exc}")
 
         self.run_background(
-            f"正在写入并核验 {len(files)} 张图片 · 请勿关闭工具",
+            f"正在写入并核验 {len(files)} 个文件 · 请勿关闭工具",
             worker,
             finished,
         )
@@ -2202,7 +2680,7 @@ class App(TkinterDnD.Tk):
         if not files:
             self.result_paths = []
             self.render_results()
-            self.status.set("扫描完成 · 当前文件夹没有支持的图片")
+            self.status.set("扫描完成 · 当前文件夹没有支持的图片或视频")
             return
 
         def worker():
@@ -2214,15 +2692,19 @@ class App(TkinterDnD.Tk):
             self.result_paths = tagged
             self.render_results()
             suffix = f" · {len(errors)} 条提示" if errors else ""
-            self.status.set(f"扫描完成 · {len(files)} 张图片中有 {len(tagged)} 张已带标签{suffix}")
+            self.status.set(
+                f"扫描完成 · {len(files)} 个文件中有 {len(tagged)} 个已带标签{suffix}"
+            )
 
         self.run_background(
-            f"正在扫描 {len(files)} 张图片的 XMP 标签",
+            f"正在扫描 {len(files)} 个文件的 XMP 标签",
             worker,
             finished,
         )
 
     def make_thumbnail(self, path: Path, size: int) -> ImageTk.PhotoImage | None:
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            return None
         try:
             with Image.open(path) as image:
                 image.thumbnail((size, size), Image.Resampling.LANCZOS)
@@ -2239,7 +2721,7 @@ class App(TkinterDnD.Tk):
         self.result_tree = None
         if self.result_paths:
             tagged_count = sum(self.tag_status.get(path) is True for path in self.result_paths)
-            self.result_count.set(f"{len(self.result_paths)} 张 · {tagged_count} 张已带标签")
+            self.result_count.set(f"{len(self.result_paths)} 个 · {tagged_count} 个已带标签")
         else:
             self.result_count.set("等待拖入")
         self.refresh_action_states()
@@ -2248,10 +2730,10 @@ class App(TkinterDnD.Tk):
             empty.pack(fill="both", expand=True)
             empty_content = ttk.Frame(empty, style="Surface.TFrame")
             empty_content.place(relx=0.5, rely=0.5, anchor="center")
-            ttk.Label(empty_content, text="拖入图片开始", style="Section.TLabel").pack()
+            ttk.Label(empty_content, text="拖入图片或视频开始", style="Section.TLabel").pack()
             ttk.Label(
                 empty_content,
-                text="支持拖入多张图片或一个文件夹，标签状态会自动显示在缩略图右侧。",
+                text="支持拖入多张图片、视频或一个文件夹，标签状态会显示在预览右侧。",
                 style="SurfaceMuted.TLabel",
             ).pack(pady=(8, 0))
             self._apply_gradient_labels(empty)
@@ -2263,19 +2745,52 @@ class App(TkinterDnD.Tk):
             self.render_list(size)
         self._apply_gradient_labels(self.result_host)
 
+    def metadata_columns(self, path: Path) -> tuple[str, str, str]:
+        state = self.tag_status.get(path)
+        tag_text = (
+            TAG
+            if state is True
+            else "未写入"
+            if state is False
+            else "读取中…"
+        )
+        metadata = self.metadata_info.get(path, {})
+        title = str(metadata.get("title", "") or "").strip()
+        subjects: list[str] = []
+        windows_subject = str(metadata.get("windows_subject", "") or "").strip()
+        if windows_subject:
+            subjects.append(windows_subject)
+        for subject in metadata.get("subjects", []):
+            subject_text = str(subject).strip()
+            if subject_text and subject_text != TAG and subject_text not in subjects:
+                subjects.append(subject_text)
+        return tag_text, title or "—", "、".join(subjects) or "—"
+
+    def metadata_text(self, path: Path) -> str:
+        tag_text, title_text, subject_text = self.metadata_columns(path)
+        return (
+            f"标记：{tag_text}\n"
+            f"标题：{title_text}\n"
+            f"主题：{subject_text}"
+        )
+
     def render_list(self, size: int) -> None:
         ttk.Style(self).configure("Treeview", rowheight=size + 16)
         tree = ttk.Treeview(
             self.result_host,
-            columns=("tag", "path"),
-            displaycolumns=("tag",),
+            columns=("tag", "title", "subject", "path"),
+            displaycolumns=("tag", "title", "subject"),
             show="tree headings",
             selectmode="extended",
         )
         tree.heading("#0", text="缩略图")
-        tree.heading("tag", text="标签信息")
+        tree.heading("tag", text="标记")
+        tree.heading("title", text="标题")
+        tree.heading("subject", text="主题")
         tree.column("#0", width=size + 24, stretch=False, anchor="center")
-        tree.column("tag", width=520, stretch=True)
+        tree.column("tag", width=215, minwidth=145, stretch=True)
+        tree.column("title", width=145, minwidth=90, stretch=True)
+        tree.column("subject", width=160, minwidth=90, stretch=True)
         tree.column("path", width=0, stretch=False)
         tree.configure(height=max(4, 430 // max(size, 40)))
         scroll = ttk.Scrollbar(
@@ -2289,20 +2804,28 @@ class App(TkinterDnD.Tk):
         scroll.pack(side="right", fill="y")
         self.result_tree = tree
         for path in self.result_paths:
-            state = self.tag_status.get(path)
-            tag_text = (
-                f"已写入 · {TAG}"
-                if state is True
-                else "未检测到 AI 标签"
-                if state is False
-                else "正在读取标签…"
-            )
+            tag_text, title_text, subject_text = self.metadata_columns(path)
             photo = self.make_thumbnail(path, size)
             if photo:
                 self.photo_refs.append(photo)
-                tree.insert("", "end", image=photo, values=(tag_text, str(path)))
+                tree.insert(
+                    "",
+                    "end",
+                    image=photo,
+                    values=(tag_text, title_text, subject_text, str(path)),
+                )
             else:
-                tree.insert("", "end", text="无法预览", values=(tag_text, str(path)))
+                preview_text = (
+                    f"视频 {path.suffix[1:].upper()}"
+                    if path.suffix.lower() in VIDEO_EXTENSIONS
+                    else "无法预览"
+                )
+                tree.insert(
+                    "",
+                    "end",
+                    text=preview_text,
+                    values=(tag_text, title_text, subject_text, str(path)),
+                )
         children = tree.get_children()
         if children:
             tree.selection_set(children)
@@ -2332,7 +2855,11 @@ class App(TkinterDnD.Tk):
             else:
                 ttk.Label(
                     card,
-                    text="无法预览",
+                    text=(
+                        f"视频\n{path.suffix[1:].upper()}"
+                        if path.suffix.lower() in VIDEO_EXTENSIONS
+                        else "无法预览"
+                    ),
                     width=16,
                     anchor="center",
                     style="SurfaceMuted.TLabel",
@@ -2344,10 +2871,9 @@ class App(TkinterDnD.Tk):
                 anchor="center",
                 style="Surface.TLabel",
             ).pack(fill="x", pady=(6, 2))
-            state = self.tag_status.get(path)
             ttk.Label(
                 card,
-                text=TAG if state is True else "未检测到 AI 标签" if state is False else "正在读取标签…",
+                text=self.metadata_text(path),
                 wraplength=size + 50,
                 style="SurfaceMuted.TLabel",
             ).pack(fill="x", pady=(0, 2))
@@ -2358,7 +2884,7 @@ class App(TkinterDnD.Tk):
 
     def copy_paths(self) -> None:
         if not self.result_paths:
-            self.status.set("当前清单为空 · 请先拖入图片")
+            self.status.set("当前清单为空 · 请先拖入图片或视频")
             return
         paths = self.result_paths
         if self.result_tree:
@@ -2370,5 +2896,14 @@ class App(TkinterDnD.Tk):
         self.status.set(f"已复制 {len(paths)} 条完整路径")
 
 
-if __name__ == "__main__":
+def main() -> int:
+    global _INSTANCE_MUTEX_HANDLE
+    _INSTANCE_MUTEX_HANDLE, acquired = acquire_single_instance()
+    if not acquired:
+        return 0
     App().mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
