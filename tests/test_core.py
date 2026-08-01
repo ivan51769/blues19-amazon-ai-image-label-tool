@@ -31,6 +31,49 @@ MP4_MINIMAL = bytes.fromhex(
 
 
 class ImageFilesTests(unittest.TestCase):
+    def test_dpi_scale_converts_windows_dpi_to_fixed_pixel_multiplier(self):
+        self.assertEqual(app.dpi_scale_from_dpi(96), 1.0)
+        self.assertEqual(app.dpi_scale_from_dpi(144), 1.5)
+        self.assertEqual(app.dpi_scale_from_dpi(192), 2.0)
+        self.assertEqual(app.dpi_scale_from_dpi(288), 3.0)
+        self.assertEqual(app.dpi_scale_from_dpi(0), 1.0)
+
+    def test_microsoft_yahei_is_available_as_default_chinese_font_label(self):
+        self.assertEqual(app.DEFAULT_FONT_LABEL, "微软雅黑")
+        self.assertIn("微软雅黑", app.FONT_OPTIONS)
+        self.assertEqual(app.resolve_font_family("微软雅黑"), "Microsoft YaHei")
+        self.assertEqual(app.LEGACY_FONT_LABELS["Microsoft YaHei"], "微软雅黑")
+
+    def test_high_dpi_layout_scales_window_buttons_and_settings_panel(self):
+        with mock.patch.object(app, "get_window_dpi", return_value=192):
+            root = app.App()
+        try:
+            root.update()
+            self.assertEqual(root.ui_scale, 2.0)
+            self.assertGreaterEqual(root.winfo_width(), app.BASE_WINDOW_WIDTH * 2)
+
+            clear_width = root.clear_button.winfo_width()
+            self.assertGreaterEqual(clear_width, 78 * 2)
+            mode_toggle = next(
+                child
+                for child in root.controls.winfo_children()
+                if isinstance(child, app.ModeToggle)
+            )
+            self.assertGreaterEqual(mode_toggle.winfo_width(), 190 * 2)
+
+            root._show_settings_panel()
+            root.update()
+            window_right = root.winfo_rootx() + root.winfo_width()
+            panel_right = root.settings_panel.winfo_rootx() + root.settings_panel.winfo_width()
+            self.assertLessEqual(panel_right, window_right)
+            self.assertGreaterEqual(
+                root.settings_panel.winfo_width(),
+                (app.SETTINGS_PANEL_WIDTH - 20) * 2,
+            )
+        finally:
+            if root.winfo_exists():
+                root.quit_app()
+
     @unittest.skipUnless(app.os.name == "nt", "Windows mutex is only used on Windows")
     def test_single_instance_mutex_closes_duplicate_process(self):
         kernel32 = mock.Mock()

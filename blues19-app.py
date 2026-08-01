@@ -25,7 +25,7 @@ except ImportError:
 
 
 TAG = "contains-synthetic-performer"
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 DEFAULT_SUFFIX = "_AI标记"
 INSTANCE_MUTEX_NAME = r"Local\blues19-amazon-ai-image-label-tool"
 ERROR_ALREADY_EXISTS = 183
@@ -109,7 +109,19 @@ THEMES = {
         "rainbow": ("#FF73B9", "#E967D1", "#B66EF0", "#7F8CFF"),
     },
 }
-FONT_OPTIONS = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "SimHei")
+FONT_FAMILIES = {
+    "微软雅黑": "Microsoft YaHei",
+    "微软雅黑 UI": "Microsoft YaHei UI",
+    "Segoe UI": "Segoe UI",
+    "黑体": "SimHei",
+}
+FONT_OPTIONS = tuple(FONT_FAMILIES)
+LEGACY_FONT_LABELS = {
+    "Microsoft YaHei": "微软雅黑",
+    "Microsoft YaHei UI": "微软雅黑 UI",
+    "SimHei": "黑体",
+}
+DEFAULT_FONT_LABEL = "微软雅黑"
 ACCENT_TEXT_OPTIONS = ("七彩渐变", "主题色", "深墨色", "柔和灰")
 GRADIENT_TEXT_COLORS = (
     "#FF8A3D",
@@ -120,6 +132,40 @@ GRADIENT_TEXT_COLORS = (
     "#4C90E9",
     "#38C6D9",
 )
+BASE_DPI = 96
+BASE_WINDOW_WIDTH = 760
+BASE_WINDOW_HEIGHT = 720
+MIN_WINDOW_WIDTH = 720
+MIN_WINDOW_HEIGHT = 580
+SETTINGS_PANEL_WIDTH = 356
+
+
+def dpi_scale_from_dpi(dpi: int | float) -> float:
+    """Convert Windows DPI to the pixel multiplier used by fixed-size Tk layouts."""
+    try:
+        value = float(dpi)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(value) or value <= 0:
+        return 1.0
+    return max(1.0, min(value / BASE_DPI, 3.0))
+
+
+def scaled_pixels(value: int | float, scale: float) -> int:
+    return max(1, round(value * scale))
+
+
+def resolve_font_family(label: str) -> str:
+    return FONT_FAMILIES.get(label, "Microsoft YaHei")
+
+
+def get_window_dpi(window: tk.Misc) -> int:
+    if os.name != "nt":
+        return BASE_DPI
+    try:
+        return max(BASE_DPI, int(ctypes.windll.user32.GetDpiForWindow(window.winfo_id())))
+    except (AttributeError, OSError, ValueError, tk.TclError):
+        return BASE_DPI
 
 
 def enable_high_dpi() -> None:
@@ -700,10 +746,13 @@ class RoundedButton(tk.Canvas):
         height: int = 30,
         radius: int = 8,
     ) -> None:
+        scale = getattr(parent._root(), "ui_scale", 1.0)
+        scaled_width = scaled_pixels(width, scale)
+        scaled_height = scaled_pixels(height, scale)
         super().__init__(
             parent,
-            width=width,
-            height=height,
+            width=scaled_width,
+            height=scaled_height,
             background=canvas_bg,
             highlightthickness=0,
             borderwidth=0,
@@ -712,9 +761,10 @@ class RoundedButton(tk.Canvas):
         )
         self.text = text
         self.command = command
-        self.button_width = width
-        self.button_height = height
-        self.radius = radius
+        self.button_width = scaled_width
+        self.button_height = scaled_height
+        self.radius = scaled_pixels(radius, scale)
+        self.ui_scale = scale
         self.primary = primary
         self.state = "normal"
         self.hovered = False
@@ -751,7 +801,7 @@ class RoundedButton(tk.Canvas):
         else:
             fill = theme.BORDER if self.pressed else theme.ACTION_SOFT if self.hovered else theme.SURFACE
             foreground, border = getattr(theme, "TEXT_BODY", theme.INK), theme.BORDER
-        inset = 2
+        inset = scaled_pixels(2, self.ui_scale)
         outline = theme.ACTION if self.focused and self.state != "disabled" else border
         self._rounded_rectangle(
             inset,
@@ -761,7 +811,7 @@ class RoundedButton(tk.Canvas):
             self.radius,
             fill=fill,
             outline=outline,
-            width=2 if self.focused else 1,
+            width=scaled_pixels(2 if self.focused else 1, self.ui_scale),
         )
         self.create_text(
             self.button_width / 2,
@@ -831,10 +881,13 @@ class ModeToggle(tk.Canvas):
     """Two-state compact selector with a dark active segment."""
 
     def __init__(self, parent, *, variable, command, canvas_bg: str) -> None:
+        self.ui_scale = getattr(parent._root(), "ui_scale", 1.0)
+        self.toggle_width = scaled_pixels(190, self.ui_scale)
+        self.toggle_height = scaled_pixels(30, self.ui_scale)
         super().__init__(
             parent,
-            width=190,
-            height=30,
+            width=self.toggle_width,
+            height=self.toggle_height,
             background=canvas_bg,
             highlightthickness=0,
             borderwidth=0,
@@ -867,26 +920,30 @@ class ModeToggle(tk.Canvas):
         theme = self._root()
         active_right = self.variable.get() >= 0.5
         outline = theme.ACTION if self.focused else theme.BORDER
+        scale = self.ui_scale
+        px = lambda value: scaled_pixels(value, scale)
         self._rounded_rectangle(
-            1, 1, 189, 29, 8,
+            px(1), px(1), self.toggle_width - px(1), self.toggle_height - px(1), px(8),
             fill=theme.ACTION_SOFT,
             outline=outline,
-            width=2 if self.focused else 1,
+            width=px(2 if self.focused else 1),
         )
-        x1, x2 = (96, 187) if active_right else (3, 94)
+        x1, x2 = (px(96), px(187)) if active_right else (px(3), px(94))
         active_fill = theme.ACTIVE if self.state != "disabled" else theme.MUTED
-        self._rounded_rectangle(x1, 3, x2, 27, 6, fill=active_fill, outline=active_fill)
+        self._rounded_rectangle(
+            x1, px(3), x2, px(27), px(6), fill=active_fill, outline=active_fill
+        )
         family = getattr(theme, "FONT_FAMILY", "Microsoft YaHei UI")
         self.create_text(
-            48,
-            15,
+            px(48),
+            px(15),
             text="替换原文件",
             fill="#FFFFFF" if not active_right else getattr(theme, "TEXT_BODY", theme.INK),
             font=(family, 9, "bold" if not active_right else "normal"),
         )
         self.create_text(
-            142,
-            15,
+            px(142),
+            px(15),
             text="保留源文件",
             fill="#FFFFFF" if active_right else getattr(theme, "TEXT_BODY", theme.INK),
             font=(family, 9, "bold" if active_right else "normal"),
@@ -902,7 +959,7 @@ class ModeToggle(tk.Canvas):
 
     def _click(self, event) -> None:
         self.focus_set()
-        self._select(0.0 if event.x < 95 else 1.0)
+        self._select(0.0 if event.x < self.toggle_width / 2 else 1.0)
 
     def _toggle(self, _event=None) -> str:
         return self._select(0.0 if self.variable.get() >= 0.5 else 1.0)
@@ -945,25 +1002,39 @@ class App(TkinterDnD.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        if os.name == "nt":
-            try:
-                dpi = ctypes.windll.user32.GetDpiForWindow(self.winfo_id())
-                self.tk.call("tk", "scaling", max(1.0, dpi / 72.0))
-            except (AttributeError, OSError, tk.TclError):
-                pass
+        self.window_dpi = get_window_dpi(self)
+        self.ui_scale = dpi_scale_from_dpi(self.window_dpi)
+        try:
+            self.tk.call("tk", "scaling", max(1.0, self.window_dpi / 72.0))
+        except tk.TclError:
+            pass
         self.title(
             f"blues19-亚马逊 AI 人物媒体标签工具 v{APP_VERSION} · 拾玖Blues"
         )
-        self.geometry("760x720")
-        self.minsize(720, 580)
+        default_width = self._scaled(BASE_WINDOW_WIDTH)
+        available_height = max(
+            self._scaled(420),
+            self.winfo_screenheight() - self._scaled(48),
+        )
+        minimum_height = min(self._scaled(MIN_WINDOW_HEIGHT), available_height)
+        default_height = max(
+            minimum_height,
+            min(self._scaled(BASE_WINDOW_HEIGHT), available_height),
+        )
+        self.geometry(f"{default_width}x{default_height}")
+        self.minsize(
+            self._scaled(MIN_WINDOW_WIDTH),
+            minimum_height,
+        )
         saved_settings = self._load_settings()
         theme_id = saved_settings.get("theme", "RainbowText")
         if theme_id not in THEMES:
             theme_id = "RainbowText"
         self.theme_name = tk.StringVar(value=theme_id)
-        saved_font = saved_settings.get("font_family", "Microsoft YaHei UI")
+        saved_font = saved_settings.get("font_family", DEFAULT_FONT_LABEL)
+        saved_font = LEGACY_FONT_LABELS.get(saved_font, saved_font)
         self.font_family = tk.StringVar(
-            value=saved_font if saved_font in FONT_OPTIONS else "Microsoft YaHei UI"
+            value=saved_font if saved_font in FONT_OPTIONS else DEFAULT_FONT_LABEL
         )
         saved_accent = saved_settings.get("accent_text", "深墨色")
         if saved_settings.get("text_color_version", 1) < 2:
@@ -971,7 +1042,7 @@ class App(TkinterDnD.Tk):
         self.accent_text = tk.StringVar(
             value=saved_accent if saved_accent in ACCENT_TEXT_OPTIONS else "七彩渐变"
         )
-        self.FONT_FAMILY = self.font_family.get()
+        self.FONT_FAMILY = resolve_font_family(self.font_family.get())
         self.bubble_enabled = tk.BooleanVar(value=bool(saved_settings.get("bubble_enabled", True)))
         self.tray_on_close = tk.BooleanVar(
             value=bool(saved_settings.get("tray_on_close", True))
@@ -1027,6 +1098,9 @@ class App(TkinterDnD.Tk):
         self.bind("<Control-c>", lambda _event: self.copy_paths())
         self.bind("<Escape>", lambda _event: self.focus_set())
         self.protocol("WM_DELETE_WINDOW", self.on_close_request)
+
+    def _scaled(self, value: int | float) -> int:
+        return scaled_pixels(value, self.ui_scale)
 
     def _load_settings(self) -> dict:
         try:
@@ -1429,23 +1503,37 @@ class App(TkinterDnD.Tk):
             if hasattr(self, "settings_panel") and self.settings_panel.winfo_exists():
                 self.settings_panel.destroy()
             self.settings_expanded = False
-            self.geometry(f"760x{self.winfo_height()}+{self.winfo_x()}+{self.winfo_y()}")
+            self.geometry(
+                f"{self._scaled(BASE_WINDOW_WIDTH)}x{self.winfo_height()}"
+                f"+{self.winfo_x()}+{self.winfo_y()}"
+            )
             return
         self._show_settings_panel()
 
     def _show_settings_panel(self) -> None:
-        settings_width = 356
-        height = max(self.winfo_height(), 580)
+        settings_width = self._scaled(SETTINGS_PANEL_WIDTH)
+        main_width = self._scaled(BASE_WINDOW_WIDTH)
+        height = max(self.winfo_height(), self._scaled(MIN_WINDOW_HEIGHT))
         x = self.winfo_x()
         y = self.winfo_y()
-        expanded_width = 760 + settings_width
+        expanded_width = main_width + settings_width
         if x + expanded_width > self.winfo_screenwidth():
             x = max(0, self.winfo_screenwidth() - expanded_width)
         self.geometry(f"{expanded_width}x{height}+{x}+{y}")
         self.settings_expanded = True
 
-        panel = ttk.Frame(self, style="Card.TFrame", padding=(14, 12))
-        panel.place(x=770, y=12, width=settings_width - 20, relheight=1, height=-24)
+        panel = ttk.Frame(
+            self,
+            style="Card.TFrame",
+            padding=(self._scaled(14), self._scaled(12)),
+        )
+        panel.place(
+            x=main_width + self._scaled(10),
+            y=self._scaled(12),
+            width=settings_width - self._scaled(20),
+            relheight=1,
+            height=-self._scaled(24),
+        )
         self.settings_panel = panel
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(14, weight=1)
@@ -1543,7 +1631,7 @@ class App(TkinterDnD.Tk):
             panel,
             text="拖入悬浮窗会直接写入标签；启用托盘后，点击关闭按钮不会退出工具。",
             style="SurfaceMuted.TLabel",
-            wraplength=296,
+            wraplength=self._scaled(296),
         ).grid(row=13, column=0, sticky="w", pady=(8, 0))
 
         brand = ttk.Frame(panel, style="Surface.TFrame")
@@ -1552,9 +1640,14 @@ class App(TkinterDnD.Tk):
         logo_path = RESOURCE_DIR / "blues19-brand-logo.png"
         try:
             with Image.open(logo_path) as source_logo:
-                logo = source_logo.convert("RGBA").resize((52, 52), Image.Resampling.LANCZOS)
+                logo_size = self._scaled(52)
+                logo = source_logo.convert("RGBA").resize(
+                    (logo_size, logo_size), Image.Resampling.LANCZOS
+                )
             mask = Image.new("L", logo.size, 0)
-            ImageDraw.Draw(mask).ellipse((1, 1, 50, 50), fill=255)
+            ImageDraw.Draw(mask).ellipse(
+                (1, 1, logo.width - 2, logo.height - 2), fill=255
+            )
             logo.putalpha(mask)
             self.brand_logo_photo = ImageTk.PhotoImage(logo)
             ttk.Label(brand, image=self.brand_logo_photo, style="Surface.TLabel").pack(
@@ -1591,7 +1684,7 @@ class App(TkinterDnD.Tk):
         self.after_idle(self._rebuild_themed_ui)
 
     def on_appearance_change(self, _event=None) -> None:
-        self.FONT_FAMILY = self.font_family.get()
+        self.FONT_FAMILY = resolve_font_family(self.font_family.get())
         self._apply_text_tokens()
         self._save_settings()
         self.after_idle(self._rebuild_themed_ui)
@@ -1875,8 +1968,16 @@ class App(TkinterDnD.Tk):
         return ImageTk.PhotoImage(rendered)
 
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=(14, 8, 14, 6))
-        root.place(x=0, y=0, width=760, relheight=1)
+        root = ttk.Frame(
+            self,
+            padding=(
+                self._scaled(14),
+                self._scaled(8),
+                self._scaled(14),
+                self._scaled(6),
+            ),
+        )
+        root.place(x=0, y=0, width=self._scaled(BASE_WINDOW_WIDTH), relheight=1)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(2, weight=1)
 
@@ -2024,7 +2125,7 @@ class App(TkinterDnD.Tk):
             to=180,
             variable=self.thumb_size,
             command=self.on_thumb_change,
-            length=130,
+            length=self._scaled(130),
         ).pack(side="right", padx=(6, 0))
         ttk.Label(result_toolbar, text="缩略图", style="SurfaceMuted.TLabel").pack(
             side="right", padx=(12, 0)
