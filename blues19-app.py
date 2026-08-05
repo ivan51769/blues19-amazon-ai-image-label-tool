@@ -13,7 +13,7 @@ import tkinter as tk
 import ctypes
 from queue import Empty, Queue
 from pathlib import Path
-from tkinter import filedialog, font as tkfont, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -25,7 +25,7 @@ except ImportError:
 
 
 TAG = "contains-synthetic-performer"
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.3.0"
 DEFAULT_SUFFIX = "_AI标记"
 INSTANCE_MUTEX_NAME = r"Local\blues19-amazon-ai-image-label-tool"
 ERROR_ALREADY_EXISTS = 183
@@ -258,7 +258,7 @@ def folder_image_files(folder: Path) -> list[Path]:
 def validate_suffix(value: str) -> str:
     suffix = value.strip()
     if not suffix:
-        raise ValueError("文件名尾缀不能为空。")
+        return ""
     if re.search(r'[<>:"/\\|?*]', suffix) or suffix.endswith((".", " ")):
         raise ValueError('文件名尾缀不能包含 < > : " / \\ | ? *，也不能以点或空格结尾。')
     return suffix
@@ -274,7 +274,7 @@ def validate_metadata_value(value: str, label: str) -> str:
 
 
 def suffixed_path(source: Path, suffix: str) -> Path:
-    if source.stem.endswith(suffix):
+    if not suffix or source.stem.endswith(suffix):
         return source
     candidate = source.with_name(f"{source.stem}{suffix}{source.suffix}")
     number = 2
@@ -647,6 +647,9 @@ def process_images(
     subject: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     suffix = validate_suffix(suffix)
+    # An empty suffix always means in-place update.  It cannot safely create a
+    # second file because the destination would be the source itself.
+    keep_source = keep_source and bool(suffix)
     outputs: list[Path] = []
     errors: list[str] = []
     for source in paths:
@@ -1061,6 +1064,9 @@ class App(TkinterDnD.Tk):
         self.custom_subject = tk.StringVar()
         self.mode_value = tk.DoubleVar(value=1.0)
         self.mode_text = tk.StringVar(value="保留源文件，生成带尾缀副本")
+        self.blank_suffix_overwrite_confirmed = bool(
+            saved_settings.get("blank_suffix_overwrite_confirmed", False)
+        )
         self.open_output_dir = tk.BooleanVar(value=True)
         self.view_mode = tk.StringVar(value="list")
         self.thumb_size = tk.IntVar(value=96)
@@ -1120,6 +1126,7 @@ class App(TkinterDnD.Tk):
                         "text_color_version": 2,
                         "bubble_enabled": self.bubble_enabled.get(),
                         "tray_on_close": self.tray_on_close.get(),
+                        "blank_suffix_overwrite_confirmed": self.blank_suffix_overwrite_confirmed,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1511,14 +1518,19 @@ class App(TkinterDnD.Tk):
         self._show_settings_panel()
 
     def _show_settings_panel(self) -> None:
-        settings_width = self._scaled(SETTINGS_PANEL_WIDTH)
+        preferred_settings_width = self._scaled(SETTINGS_PANEL_WIDTH)
         main_width = self._scaled(BASE_WINDOW_WIDTH)
         height = max(self.winfo_height(), self._scaled(MIN_WINDOW_HEIGHT))
         x = self.winfo_x()
         y = self.winfo_y()
+        screen_width = self.winfo_screenwidth()
+        settings_width = min(
+            preferred_settings_width,
+            max(1, screen_width - main_width),
+        )
         expanded_width = main_width + settings_width
-        if x + expanded_width > self.winfo_screenwidth():
-            x = max(0, self.winfo_screenwidth() - expanded_width)
+        if x + expanded_width > screen_width:
+            x = max(0, screen_width - expanded_width)
         self.geometry(f"{expanded_width}x{height}+{x}+{y}")
         self.settings_expanded = True
 
@@ -1527,10 +1539,11 @@ class App(TkinterDnD.Tk):
             style="Card.TFrame",
             padding=(self._scaled(14), self._scaled(12)),
         )
+        panel_inset = min(self._scaled(10), max(0, (settings_width - 1) // 2))
         panel.place(
-            x=main_width + self._scaled(10),
+            x=main_width + panel_inset,
             y=self._scaled(12),
-            width=settings_width - self._scaled(20),
+            width=max(1, settings_width - panel_inset * 2),
             relheight=1,
             height=-self._scaled(24),
         )
@@ -2026,6 +2039,7 @@ class App(TkinterDnD.Tk):
             canvas_bg=self.SURFACE,
         )
         mode_toggle.grid(row=0, column=3, padx=(5, 8))
+        self.mode_toggle = mode_toggle
         self.action_buttons.append(mode_toggle)
 
         ttk.Checkbutton(
@@ -2544,6 +2558,28 @@ class App(TkinterDnD.Tk):
         self.mode_value.set(1.0 if keep else 0.0)
         self.mode_text.set("保留源文件，生成带尾缀副本" if keep else "写入原文件，并添加尾缀重命名")
 
+    def confirm_blank_suffix_overwrite(self, suffix: str) -> bool:
+        """Confirm the one-time opt-in for writing an empty suffix in place."""
+        if suffix:
+            return True
+        if not self.blank_suffix_overwrite_confirmed:
+            confirmed = messagebox.askokcancel(
+                "直接覆盖原文件",
+                "文件名尾缀已清空。写入标签将直接覆盖原文件，不能保留源文件副本。\n\n"
+                "确定后将不再显示此提醒。",
+                icon="warning",
+                parent=self,
+            )
+            if not confirmed:
+                return False
+            self.blank_suffix_overwrite_confirmed = True
+            self._save_settings()
+        self.mode_value.set(0.0)
+        self.on_mode_change()
+        if hasattr(self, "mode_toggle") and self.mode_toggle.winfo_exists():
+            self.mode_toggle._draw()
+        return True
+
     def on_custom_metadata_toggle(self) -> None:
         if self.folder_metadata_enabled.get() and not (
             self.custom_title_enabled.get() and self.custom_subject_enabled.get()
@@ -2716,6 +2752,9 @@ class App(TkinterDnD.Tk):
             title, subject, folder_metadata = self._selected_custom_metadata()
         except Exception as exc:
             self.status.set(f"写入设置不可用 · {exc}")
+            return
+        if not self.confirm_blank_suffix_overwrite(suffix):
+            self.status.set("已取消写入 · 请输入尾缀以保留源文件，或确认直接覆盖原文件")
             return
         keep_source = self.mode_value.get() >= 0.5
 
